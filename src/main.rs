@@ -497,7 +497,7 @@ fn ctx_colored(pct: f64, text: &str) -> String {
     name = "claude-usage",
     about = "Claude usage window optimizer: status bar, token tracking, defer logic",
     version,
-    long_version = env!("CARGO_PKG_VERSION"),
+    long_version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("TARGET"), ")"),
 )]
 struct Cli {
     #[command(subcommand)]
