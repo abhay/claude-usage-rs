@@ -670,7 +670,7 @@ fn run_statusline(s: &Status) {
 
     if let Some(cost) = cc.cost.as_ref().and_then(|c| c.total_cost_usd) {
         if cost > 0.001 {
-            parts.push(ansi("90", &format!("${:.3}", cost)));
+            parts.push(ansi("90", &format!("~${:.2}", cost)));
         }
     }
 
