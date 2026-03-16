@@ -207,6 +207,181 @@ fn claude_config_dir() -> Option<PathBuf> {
 }
 
 // ---------------------------------------------------------------------------
+// Anthropic API status (via Statuspage.io) + connectivity
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct ApiStatusCache {
+    fetched_at: String,
+    indicator: String,
+    description: String,
+    /// ISO 8601 timestamp: don't attempt fetch before this time.
+    #[serde(default)]
+    next_retry_at: Option<String>,
+    /// Consecutive fetch failures (reset to 0 on success).
+    #[serde(default)]
+    consecutive_failures: u32,
+}
+
+/// Resolved status with connectivity context.
+#[derive(Debug, Clone)]
+struct ApiStatus {
+    indicator: String,
+    description: String,
+    age_secs: i64,
+    online: bool, // true = fresh fetch succeeded (or cache < 5 min)
+}
+
+impl ApiStatus {
+    fn has_incident(&self) -> bool {
+        self.indicator != "none"
+    }
+
+    fn age_label(&self) -> String {
+        let s = self.age_secs;
+        match s {
+            s if s < 60 => "just now".into(),
+            s if s < 3600 => format!("{}m ago", s / 60),
+            s if s < 86400 => format!("{}h ago", s / 3600),
+            s => format!("{}d ago", s / 86400),
+        }
+    }
+}
+
+fn api_status_cache_path() -> Option<PathBuf> {
+    claude_config_dir().map(|d| d.join("api-status-cache.json"))
+}
+
+fn load_cached_api_status() -> Option<ApiStatusCache> {
+    let path = api_status_cache_path()?;
+    let data = fs::read_to_string(path).ok()?;
+    serde_json::from_str(&data).ok()
+}
+
+fn cache_age_secs(cache: &ApiStatusCache) -> i64 {
+    cache
+        .fetched_at
+        .parse::<DateTime<Utc>>()
+        .map(|t| (Utc::now() - t).num_seconds())
+        .unwrap_or(i64::MAX)
+}
+
+fn save_api_status_cache(cache: &ApiStatusCache) {
+    let Some(path) = api_status_cache_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(cache) {
+        let _ = fs::write(path, json);
+    }
+}
+
+/// Backoff seconds for consecutive failures: 5, 10, 20, 40, 80, 160, 300 (cap).
+fn backoff_secs(failures: u32) -> i64 {
+    (5 * 2_i64.pow(failures.min(6))).min(300)
+}
+
+fn should_skip_fetch() -> bool {
+    load_cached_api_status()
+        .and_then(|c| c.next_retry_at)
+        .and_then(|t| t.parse::<DateTime<Utc>>().ok())
+        .is_some_and(|t| Utc::now() < t)
+}
+
+fn record_fetch_failure() {
+    if let Some(mut cache) = load_cached_api_status() {
+        cache.consecutive_failures += 1;
+        let delay = backoff_secs(cache.consecutive_failures);
+        cache.next_retry_at = Some((Utc::now() + chrono::Duration::seconds(delay)).to_rfc3339());
+        save_api_status_cache(&cache);
+    }
+}
+
+fn fetch_api_status_raw() -> Option<ApiStatusCache> {
+    let body_str = ureq::get("https://status.anthropic.com/api/v2/status.json")
+        .timeout(Duration::from_secs(5))
+        .call()
+        .ok()?
+        .into_string()
+        .ok()?;
+    let body: serde_json::Value = serde_json::from_str(&body_str).ok()?;
+    let status = body.get("status")?;
+    let cache = ApiStatusCache {
+        fetched_at: Utc::now().to_rfc3339(),
+        indicator: status
+            .get("indicator")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string(),
+        description: status
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown")
+            .to_string(),
+        next_retry_at: None,
+        consecutive_failures: 0,
+    };
+    save_api_status_cache(&cache);
+    Some(cache)
+}
+
+fn to_api_status(cache: &ApiStatusCache, online: bool) -> ApiStatus {
+    ApiStatus {
+        indicator: cache.indicator.clone(),
+        description: cache.description.clone(),
+        age_secs: cache_age_secs(cache),
+        online,
+    }
+}
+
+/// Read from cache only (for latency-sensitive paths like statusline).
+fn get_api_status_cached() -> Option<ApiStatus> {
+    let cache = load_cached_api_status()?;
+    let age = cache_age_secs(&cache);
+    Some(to_api_status(&cache, age <= 300))
+}
+
+/// Try to fetch, respecting backoff. Returns true=online if succeeded.
+fn try_fetch() -> Option<ApiStatusCache> {
+    if should_skip_fetch() {
+        return None;
+    }
+    match fetch_api_status_raw() {
+        Some(cache) => Some(cache),
+        None => {
+            record_fetch_failure();
+            None
+        }
+    }
+}
+
+/// Refresh if stale (5 min TTL), fall back to stale cache on fetch failure.
+/// Respects exponential backoff on repeated failures.
+fn get_api_status_fresh() -> Option<ApiStatus> {
+    if let Some(cached) = load_cached_api_status() {
+        if cache_age_secs(&cached) <= 300 {
+            return Some(to_api_status(&cached, true));
+        }
+    }
+    if let Some(fresh) = try_fetch() {
+        return Some(to_api_status(&fresh, true));
+    }
+    // Fetch failed or skipped — use stale cache, mark offline
+    load_cached_api_status().map(|c| to_api_status(&c, false))
+}
+
+/// Always fetch, ignoring backoff (for dedicated api-status subcommand).
+fn get_api_status_forced() -> Option<ApiStatus> {
+    if let Some(fresh) = fetch_api_status_raw() {
+        return Some(to_api_status(&fresh, true));
+    }
+    record_fetch_failure();
+    load_cached_api_status().map(|c| to_api_status(&c, false))
+}
+
+// ---------------------------------------------------------------------------
 // Config loading
 // ---------------------------------------------------------------------------
 
@@ -525,6 +700,8 @@ enum Cmd {
         #[arg(default_value = "large")]
         size: String,
     },
+    /// Check Anthropic API status (via status.anthropic.com)
+    ApiStatus,
     /// Write windows.json to ~/.claude/ and register statusLine in settings.json
     Init,
     /// MCP server over stdio (JSON-RPC 2.0)
@@ -539,6 +716,10 @@ fn main() -> Result<()> {
     }
     if let Cmd::Mcp = cmd {
         return run_mcp();
+    }
+    if let Cmd::ApiStatus = cmd {
+        run_api_status();
+        return Ok(());
     }
 
     let config = match load_config() {
@@ -564,7 +745,7 @@ fn main() -> Result<()> {
         Cmd::Windows => run_windows(&s),
         Cmd::Wait => run_wait(&s),
         Cmd::Defer { size } => run_defer(&s, &size),
-        Cmd::Init | Cmd::Mcp => unreachable!(),
+        Cmd::Init | Cmd::Mcp | Cmd::ApiStatus => unreachable!(),
     }
     Ok(())
 }
@@ -610,18 +791,33 @@ fn run_statusline(s: &Status) {
     let day_total = state.daily.get(&day_key).copied().unwrap_or(0);
     let week_total = state.weekly.get(&week_key).copied().unwrap_or(0);
 
-    // ── Line 1: promo/peak status (omitted when no window is active) ──────────
+    // ── Line 1: promo/peak status + connectivity/incident (cache-read only) ─
+    let api = get_api_status_cached();
+    let suffix = match &api {
+        Some(s) if s.has_incident() => {
+            let icon = match s.indicator.as_str() {
+                "critical" => "⛔",
+                "major" => "⚠️",
+                _ => "⚠",
+            };
+            ansi("31;1", &format!("  {} {}", icon, s.description))
+        }
+        Some(s) if !s.online => ansi("90", "  📡?"),
+        _ => String::new(),
+    };
+
     if !s.active_windows.is_empty() {
         if s.favorable {
             println!(
-                "{} {}  ends in {}",
+                "{} {}  ends in {}{}",
                 ansi("32;1", &format!("⚡{:.0}x", s.multiplier)),
                 ansi("32;1", "OFF-PEAK"),
-                fmt_mins_opt(s.mins_until_change)
+                fmt_mins_opt(s.mins_until_change),
+                suffix
             );
         } else {
             println!(
-                "{} {}  {:.0}x in {}",
+                "{} {}  {:.0}x in {}{}",
                 ansi("33;1", &format!("·{:.0}x", s.multiplier)),
                 ansi("33;1", "PEAK"),
                 s.active_windows
@@ -630,9 +826,12 @@ fn run_statusline(s: &Status) {
                     .map(|w| w.multiplier)
                     .next()
                     .unwrap_or(2.0),
-                fmt_mins_opt(s.mins_until_favorable)
+                fmt_mins_opt(s.mins_until_favorable),
+                suffix
             );
         }
+    } else if !suffix.is_empty() {
+        println!("{}", suffix);
     }
 
     // ── Line 2: model │ ctx bar │ token counts │ cost ────────────────────────
@@ -681,10 +880,37 @@ fn run_statusline(s: &Status) {
 }
 
 // ---------------------------------------------------------------------------
-// Other commands (unchanged)
+// Other commands
 // ---------------------------------------------------------------------------
 
+fn fmt_api_status_line(status: &ApiStatus) -> String {
+    let age = status.age_label();
+    let conn = if status.online { "" } else { " (offline)" };
+    if status.has_incident() {
+        let icon = match status.indicator.as_str() {
+            "critical" => "🔴",
+            "major" => "🟠",
+            _ => "🟡",
+        };
+        format!("{} API: {} ({}){}", icon, status.description, age, conn)
+    } else {
+        format!("🟢 API: {} ({}){}", status.description, age, conn)
+    }
+}
+
+fn run_api_status() {
+    match get_api_status_forced() {
+        Some(status) => println!("{}", fmt_api_status_line(&status)),
+        None => println!("⚪ API: Unable to fetch status (no connection, no cache)"),
+    }
+}
+
 fn run_status(s: &Status) {
+    // API status
+    if let Some(status) = get_api_status_fresh() {
+        println!("{}", fmt_api_status_line(&status));
+    }
+
     if s.active_windows.is_empty() {
         println!("No active Claude usage promotions. Standard rates apply.");
         for w in &s.inactive_windows {
@@ -764,8 +990,16 @@ fn run_json(s: &Status) -> Result<()> {
         favorable: bool,
         mins_until_favorable: Option<u32>,
         mins_until_change: Option<u32>,
+        api_status: Option<ApiStatusOut>,
         active_windows: Vec<WinOut>,
         inactive_windows: Vec<WinOut>,
+    }
+    #[derive(Serialize)]
+    struct ApiStatusOut {
+        indicator: String,
+        description: String,
+        online: bool,
+        age_secs: i64,
     }
     #[derive(Serialize)]
     struct WinOut {
@@ -790,6 +1024,12 @@ fn run_json(s: &Status) -> Result<()> {
         promo_ends_in_mins: w.promo_ends_in,
         source: w.window.source.clone(),
     };
+    let api_status = get_api_status_fresh().map(|s| ApiStatusOut {
+        indicator: s.indicator,
+        description: s.description,
+        online: s.online,
+        age_secs: s.age_secs,
+    });
     println!(
         "{}",
         serde_json::to_string_pretty(&Out {
@@ -798,6 +1038,7 @@ fn run_json(s: &Status) -> Result<()> {
             favorable: s.favorable,
             mins_until_favorable: s.mins_until_favorable,
             mins_until_change: s.mins_until_change,
+            api_status,
             active_windows: s.active_windows.iter().map(to_w).collect(),
             inactive_windows: s.inactive_windows.iter().map(to_w).collect(),
         })?
@@ -969,11 +1210,20 @@ fn run_mcp() -> Result<()> {
                         "size not worth deferring"
                     };
 
+                    let api_status = get_api_status_fresh();
+                    let api_warning = api_status
+                        .as_ref()
+                        .filter(|s| s.has_incident())
+                        .map(|s| format!("API {}: {}", s.indicator, s.description));
+
                     let result = serde_json::json!({
                         "defer": defer,
                         "multiplier": s.multiplier,
                         "reason": reason,
                         "favorable_in_mins": s.mins_until_favorable,
+                        "api_status": api_status.as_ref().map(|s| &s.indicator),
+                        "api_status_warning": api_warning,
+                        "online": api_status.as_ref().map(|s| s.online),
                     });
 
                     jsonrpc_response(

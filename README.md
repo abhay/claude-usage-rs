@@ -19,6 +19,7 @@ Opus 4.6 (1M context) │ █░░░░░░░ 12% │ sess 45.6k │ day 12
 **Status check:**
 ```
 $ claude-usage
+🟢 API: All Systems Operational (just now)
 🟢 Off-peak (2x) (2x usage)
    Ends in:      7h 55m
    Promo: March 2026 2x Promo (ends in 12d 1h)
@@ -65,7 +66,8 @@ CLAUDE_CONFIG_DIR=~/.claude-work claude-usage init
 ## Commands
 
 ```sh
-claude-usage              # human-readable status
+claude-usage              # human-readable status (includes API health)
+claude-usage api-status   # check Anthropic API status
 claude-usage label        # compact PS1/Starship token: ⚡2x
 claude-usage tmux         # tmux status bar segment
 claude-usage statusline   # Claude Code status bar (reads JSON from stdin)
