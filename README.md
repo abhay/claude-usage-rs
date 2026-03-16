@@ -8,6 +8,12 @@ Anthropic is running a promo currently (at the time of writing this tool) where 
 
 ## Install
 
+**macOS / Linux:**
+```sh
+curl -fsSL https://raw.githubusercontent.com/abhay/claude-usage-rs/main/install.sh | sh
+```
+
+**From source:**
 ```sh
 cargo install --path .
 ```
