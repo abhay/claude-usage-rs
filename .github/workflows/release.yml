@@ -109,3 +109,9 @@ jobs:
             checksums.txt
           generate_release_notes: true
           fail_on_unmatched_files: true
+
+      - name: Update Homebrew formula
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: .github/update-homebrew.sh
