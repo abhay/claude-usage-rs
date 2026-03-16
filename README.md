@@ -30,7 +30,13 @@ $ claude-usage defer large
 
 ## Install
 
-**macOS / Linux:**
+**Homebrew:**
+```sh
+brew tap abhay/tap
+brew install claude-usage
+```
+
+**Shell installer (macOS / Linux):**
 ```sh
 curl -fsSL https://raw.githubusercontent.com/abhay/claude-usage-rs/main/install.sh | sh
 ```
