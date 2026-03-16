@@ -19,7 +19,7 @@ serde_json = "1"
 chrono     = { version = "0.4", features = ["serde"] }
 anyhow     = "1"
 clap       = { version = "4",   features = ["derive"] }
-ureq       = { version = "2",  features = ["native-tls"] }
+ureq       = { version = "2",  default-features = false, features = ["tls"] }
 
 [profile.release]
 strip         = true   # strip debug symbols (~30% size reduction)
