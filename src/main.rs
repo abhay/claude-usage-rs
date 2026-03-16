@@ -999,24 +999,22 @@ fn run_mcp() -> Result<()> {
     Ok(())
 }
 
-fn run_init() -> Result<()> {
-    let claude_dir =
-        claude_config_dir().ok_or_else(|| anyhow!("neither CLAUDE_CONFIG_DIR nor HOME is set"))?;
-    fs::create_dir_all(&claude_dir)?;
+fn init_claude_dir(claude_dir: &PathBuf) -> Result<()> {
+    fs::create_dir_all(claude_dir)?;
 
     // 1. Write windows.json
     let windows_dest = claude_dir.join("usage-windows.json");
     if windows_dest.exists() {
         println!(
-            "Config exists: {} (not overwritten)",
+            "  Config exists: {} (not overwritten)",
             windows_dest.display()
         );
     } else {
         fs::write(&windows_dest, DEFAULT_WINDOWS_JSON)?;
-        println!("Initialized:   {}", windows_dest.display());
+        println!("  Initialized:   {}", windows_dest.display());
     }
 
-    // 2. Register as statusLine in ~/.claude/settings.json (non-destructive merge)
+    // 2. Register as statusLine in settings.json (non-destructive merge)
     let settings_path = claude_dir.join("settings.json");
     let raw = if settings_path.exists() {
         fs::read_to_string(&settings_path)?
@@ -1030,9 +1028,9 @@ fn run_init() -> Result<()> {
         settings["statusLine"] =
             serde_json::json!({ "type": "command", "command": "claude-usage statusline" });
         fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
-        println!("statusLine registered in: {}", settings_path.display());
+        println!("  statusLine registered in: {}", settings_path.display());
     } else {
-        println!("statusLine already set in: {}", settings_path.display());
+        println!("  statusLine already set in: {}", settings_path.display());
     }
 
     // 3. Register MCP server in settings.json (non-destructive)
@@ -1047,13 +1045,59 @@ fn run_init() -> Result<()> {
         settings["mcpServers"]["claude-usage"] =
             serde_json::json!({ "command": "claude-usage", "args": ["mcp"] });
         fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
-        println!("MCP server registered in: {}", settings_path.display());
+        println!("  MCP server registered in: {}", settings_path.display());
     } else {
-        println!("MCP server already set in: {}", settings_path.display());
+        println!("  MCP server already set in: {}", settings_path.display());
     }
 
-    println!("\nRestart Claude Code to activate.");
-    println!("Edit {} to add future promos.", windows_dest.display());
+    Ok(())
+}
+
+fn find_claude_dirs() -> Vec<PathBuf> {
+    let Some(home) = std::env::var("HOME").ok().map(PathBuf::from) else {
+        return vec![];
+    };
+    let Ok(entries) = fs::read_dir(&home) else {
+        return vec![];
+    };
+    let mut dirs: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with(".claude") && e.path().is_dir()
+        })
+        .map(|e| e.path())
+        .collect();
+    dirs.sort();
+    dirs
+}
+
+fn run_init() -> Result<()> {
+    // If CLAUDE_CONFIG_DIR is set, only init that one
+    if let Ok(dir) = std::env::var("CLAUDE_CONFIG_DIR") {
+        let dir = PathBuf::from(dir);
+        println!("{}:", dir.display());
+        init_claude_dir(&dir)?;
+        println!("\nRestart Claude Code to activate.");
+        return Ok(());
+    }
+
+    // Scan for ~/.claude* directories
+    let mut dirs = find_claude_dirs();
+    if dirs.is_empty() {
+        // No existing dirs, create ~/.claude
+        let home = std::env::var("HOME").map_err(|_| anyhow!("HOME is not set"))?;
+        dirs.push(PathBuf::from(home).join(".claude"));
+    }
+
+    for dir in &dirs {
+        println!("{}:", dir.display());
+        init_claude_dir(dir)?;
+        println!();
+    }
+
+    println!("Restart Claude Code to activate.");
     Ok(())
 }
 

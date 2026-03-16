@@ -52,12 +52,11 @@ cargo install --path .
 claude-usage init
 ```
 
-Writes a default `usage-windows.json` and registers the statusline in Claude Code's `settings.json`.
+Writes `usage-windows.json`, registers the statusline, and sets up the MCP server. If you have multiple `~/.claude*` directories, `init` finds and configures all of them automatically.
 
-**Multiple Claude instances?** I run a few locally, so `init` targets `$CLAUDE_CONFIG_DIR` if set, otherwise `~/.claude/`:
+To target a specific instance:
 
 ```sh
-CLAUDE_CONFIG_DIR=~/.claude-home claude-usage init
 CLAUDE_CONFIG_DIR=~/.claude-work claude-usage init
 ```
 
