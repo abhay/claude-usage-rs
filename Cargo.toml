@@ -3,6 +3,11 @@ name = "claude-usage"
 version = "0.1.0"
 edition = "2021"
 description = "CLI for tracking Claude usage windows: status bar, token tracking, defer logic"
+license = "MIT"
+repository = "https://github.com/abhay/claude-usage-rs"
+readme = "README.md"
+keywords = ["claude", "anthropic", "cli", "productivity"]
+categories = ["command-line-utilities"]
 
 [[bin]]
 name = "claude-usage"
