@@ -6,6 +6,28 @@ Anthropic is running a promo currently (at the time of writing this tool) where 
 
 **Config-driven.** New promotions go in `~/.claude/usage-windows.json`. No code changes needed.
 
+### What it looks like
+
+**Claude Code status bar:**
+```
+⚡ 2x OFF-PEAK  ends in 7h 59m
+Opus 4.6 (1M context) │ █░░░░░░░ 12% │ sess 45.6k │ day 123k │ wk 890k │ ~$19.09
+```
+
+**Status check:**
+```
+$ claude-usage
+🟢 Off-peak (2x) (2x usage)
+   Ends in:      7h 55m
+   Promo: March 2026 2x Promo (ends in 12d 1h)
+```
+
+**Defer decision:**
+```
+$ claude-usage defer large
+✅ PROCEED: large at 2x (already in favorable window)
+```
+
 ## Install
 
 **macOS / Linux:**

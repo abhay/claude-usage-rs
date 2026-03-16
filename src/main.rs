@@ -88,7 +88,6 @@ struct StatuslineInput {
     session_id: Option<String>,
     model: Option<StatuslineModel>,
     context_window: Option<ContextWindowInfo>,
-    current_usage: Option<CurrentUsage>,
     cost: Option<CostInfo>,
 }
 
@@ -100,6 +99,7 @@ struct StatuslineModel {
 #[derive(Debug, Deserialize)]
 struct ContextWindowInfo {
     used_percentage: Option<f64>,
+    current_usage: Option<CurrentUsage>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -587,8 +587,9 @@ fn run_statusline(s: &Status) {
     let cc: StatuslineInput = serde_json::from_str(&raw).unwrap_or_default();
 
     let session_total = cc
-        .current_usage
+        .context_window
         .as_ref()
+        .and_then(|cw| cw.current_usage.as_ref())
         .map(|u| {
             u.input_tokens.unwrap_or(0)
                 + u.output_tokens.unwrap_or(0)
