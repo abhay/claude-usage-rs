@@ -73,6 +73,26 @@ set -g status-interval 60
 claude-usage wait && claude "refactor the auth module"
 ```
 
+## MCP server (Claude Code integration)
+
+Claude can check the usage window mid-task via MCP:
+
+```json
+{
+  "mcpServers": {
+    "claude-usage": {
+      "command": "claude-usage",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Or run `claude-usage init` to register it automatically.
+
+Available tools:
+- `should_defer_task`: returns a defer/proceed recommendation for a given task size
+
 ## Adding a promotion
 
 Edit `~/.claude/usage-windows.json` and drop in an entry:

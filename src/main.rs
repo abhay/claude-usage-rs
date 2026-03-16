@@ -2,7 +2,14 @@ use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Datelike, NaiveTime, Utc, Weekday};
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fs, io::Read, path::PathBuf, thread, time::Duration};
+use std::{
+    collections::HashMap,
+    fs,
+    io::{BufRead, Read, Write},
+    path::PathBuf,
+    thread,
+    time::Duration,
+};
 
 // ---------------------------------------------------------------------------
 // Window config schema
@@ -520,6 +527,8 @@ enum Cmd {
     },
     /// Write windows.json to ~/.claude/ and register statusLine in settings.json
     Init,
+    /// MCP server over stdio (JSON-RPC 2.0)
+    Mcp,
 }
 
 fn main() -> Result<()> {
@@ -527,6 +536,9 @@ fn main() -> Result<()> {
 
     if let Cmd::Init = cmd {
         return run_init();
+    }
+    if let Cmd::Mcp = cmd {
+        return run_mcp();
     }
 
     let config = match load_config() {
@@ -552,7 +564,7 @@ fn main() -> Result<()> {
         Cmd::Windows => run_windows(&s),
         Cmd::Wait => run_wait(&s),
         Cmd::Defer { size } => run_defer(&s, &size),
-        Cmd::Init => unreachable!(),
+        Cmd::Init | Cmd::Mcp => unreachable!(),
     }
     Ok(())
 }
@@ -850,6 +862,142 @@ fn run_defer(s: &Status, size: &str) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// MCP server (JSON-RPC 2.0 over stdio)
+// ---------------------------------------------------------------------------
+
+fn jsonrpc_response(id: &serde_json::Value, result: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": result,
+    })
+}
+
+fn jsonrpc_error(id: &serde_json::Value, code: i32, message: &str) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": { "code": code, "message": message },
+    })
+}
+
+fn run_mcp() -> Result<()> {
+    let stdin = std::io::stdin();
+    let mut stdout = std::io::stdout();
+
+    for line in stdin.lock().lines() {
+        let line = line.context("failed to read stdin")?;
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let msg: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => {
+                let resp = jsonrpc_error(&serde_json::Value::Null, -32700, "parse error");
+                serde_json::to_writer(&mut stdout, &resp)?;
+                writeln!(stdout)?;
+                stdout.flush()?;
+                continue;
+            }
+        };
+
+        // Notifications (no id) are silently ignored
+        let Some(id) = msg.get("id") else {
+            continue;
+        };
+        let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
+
+        let resp = match method {
+            "initialize" => jsonrpc_response(
+                id,
+                serde_json::json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": { "tools": {} },
+                    "serverInfo": {
+                        "name": "claude-usage",
+                        "version": env!("CARGO_PKG_VERSION"),
+                    },
+                }),
+            ),
+
+            "tools/list" => jsonrpc_response(
+                id,
+                serde_json::json!({
+                    "tools": [{
+                        "name": "should_defer_task",
+                        "description": "Check whether a task should be deferred based on the current Claude usage window. Returns the current multiplier and a defer recommendation.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "size": {
+                                    "type": "string",
+                                    "description": "Task size: small, medium, large, or xl",
+                                    "default": "large",
+                                }
+                            }
+                        }
+                    }]
+                }),
+            ),
+
+            "tools/call" => {
+                let params = msg.get("params").cloned().unwrap_or_default();
+                let tool_name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
+
+                if tool_name != "should_defer_task" {
+                    jsonrpc_error(id, -32602, &format!("unknown tool: {}", tool_name))
+                } else {
+                    let size = params
+                        .get("arguments")
+                        .and_then(|a| a.get("size"))
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("large");
+
+                    let config = load_config()?;
+                    let now = Utc::now();
+                    let s = evaluate(config, now);
+                    let defer = should_defer(size, &s);
+
+                    let reason = if defer {
+                        "below favorable threshold"
+                    } else if s.multiplier >= s.thresholds.defer_at_multiplier_below {
+                        "already in favorable window"
+                    } else {
+                        "size not worth deferring"
+                    };
+
+                    let result = serde_json::json!({
+                        "defer": defer,
+                        "multiplier": s.multiplier,
+                        "reason": reason,
+                        "favorable_in_mins": s.mins_until_favorable,
+                    });
+
+                    jsonrpc_response(
+                        id,
+                        serde_json::json!({
+                            "content": [{
+                                "type": "text",
+                                "text": serde_json::to_string(&result)?,
+                            }]
+                        }),
+                    )
+                }
+            }
+
+            _ => jsonrpc_error(id, -32601, "method not found"),
+        };
+
+        serde_json::to_writer(&mut stdout, &resp)?;
+        writeln!(stdout)?;
+        stdout.flush()?;
+    }
+
+    Ok(())
+}
+
 fn run_init() -> Result<()> {
     let claude_dir =
         claude_config_dir().ok_or_else(|| anyhow!("neither CLAUDE_CONFIG_DIR nor HOME is set"))?;
@@ -886,7 +1034,24 @@ fn run_init() -> Result<()> {
         println!("statusLine already set in: {}", settings_path.display());
     }
 
-    println!("\nRestart Claude Code to activate the status bar.");
+    // 3. Register MCP server in settings.json (non-destructive)
+    let needs_mcp = settings
+        .get("mcpServers")
+        .and_then(|v| v.as_object())
+        .is_none_or(|obj| !obj.contains_key("claude-usage"));
+    if needs_mcp {
+        if !settings.get("mcpServers").is_some_and(|v| v.is_object()) {
+            settings["mcpServers"] = serde_json::json!({});
+        }
+        settings["mcpServers"]["claude-usage"] =
+            serde_json::json!({ "command": "claude-usage", "args": ["mcp"] });
+        fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
+        println!("MCP server registered in: {}", settings_path.display());
+    } else {
+        println!("MCP server already set in: {}", settings_path.display());
+    }
+
+    println!("\nRestart Claude Code to activate.");
     println!("Edit {} to add future promos.", windows_dest.display());
     Ok(())
 }
