@@ -173,6 +173,10 @@ Edit `~/.claude/usage-windows.json` and drop in an entry:
 | `inverse_recurring` | Matches everything *outside* a recurring window |
 | `always` | Matches all times (flat multiplier for the whole promo) |
 
+## Platform support
+
+macOS and Linux. No Windows support yet.
+
 ## License
 
 MIT

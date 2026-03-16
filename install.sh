@@ -32,7 +32,7 @@ case "$OS" in
     EXT="tar.gz"
     ;;
   *)
-    echo "Windows: download from https://github.com/$REPO/releases/latest" >&2
+    echo "Unsupported OS: $OS (macOS and Linux only)" >&2
     exit 1
     ;;
 esac
