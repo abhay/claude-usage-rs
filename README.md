@@ -1,5 +1,7 @@
 # claude-usage
 
+![claude-usage statusline](assets/statusline.png)
+
 Tracks Claude promotional usage windows so you know when you're getting 2x and when you're not.
 
 Anthropic is running a promo currently (at the time of writing this tool) where you have access to "doubled usage outside peak hours." This tool watches the clock and bolts onto your shell prompt, tmux, and Claude Code status bar.
