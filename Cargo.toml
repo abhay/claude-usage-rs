@@ -1,0 +1,22 @@
+[package]
+name = "claude-usage"
+version = "0.1.0"
+edition = "2021"
+description = "CLI for tracking Claude usage windows: status bar, token tracking, defer logic"
+
+[[bin]]
+name = "claude-usage"
+path = "src/main.rs"
+
+[dependencies]
+serde      = { version = "1",   features = ["derive"] }
+serde_json = "1"
+chrono     = { version = "0.4", features = ["serde"] }
+anyhow     = "1"
+clap       = { version = "4",   features = ["derive"] }
+
+[profile.release]
+strip         = true   # strip debug symbols (~30% size reduction)
+opt-level     = "z"    # optimize for binary size
+lto           = true   # link-time optimization
+codegen-units = 1      # single codegen unit for better LTO

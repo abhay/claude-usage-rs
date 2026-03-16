@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Claude usage window configuration. Add new promotions here as Anthropic announces them.",
+  "version": "1",
+
+  "windows": [
+    {
+      "id": "anthropic-march-2026-promo",
+      "label": "March 2026 2x Promo",
+      "description": "Doubled usage outside peak hours during March 2026",
+      "source": "https://support.claude.com/en/articles/14063676-claude-march-2026-usage-promotion",
+
+      "active_range": {
+        "start": "2026-03-13T00:00:00Z",
+        "end":   "2026-03-28T06:59:59Z"
+      },
+
+      "tiers": [
+        {
+          "id": "off_peak",
+          "label": "Off-peak (2x)",
+          "multiplier": 2.0,
+          "favorable": true,
+          "schedule": {
+            "type": "inverse_recurring",
+            "base": {
+              "type": "recurring",
+              "days": ["mon","tue","wed","thu","fri"],
+              "utc_start": "13:00",
+              "utc_end":   "19:00"
+            }
+          }
+        },
+        {
+          "id": "peak",
+          "label": "Peak (1x)",
+          "multiplier": 1.0,
+          "favorable": false,
+          "schedule": {
+            "type": "recurring",
+            "days": ["mon","tue","wed","thu","fri"],
+            "utc_start": "13:00",
+            "utc_end":   "19:00"
+          }
+        }
+      ],
+
+      "plans": ["free","pro","max","team"],
+      "surfaces": ["claude.ai","claude_code","cowork","excel","powerpoint"]
+    }
+  ],
+
+  "task_size_thresholds": {
+    "defer_at_multiplier_below": 1.5,
+    "sizes": {
+      "small":  { "defer": false, "description": "Single function / one-liner" },
+      "medium": { "defer": false, "description": "Single feature / one file" },
+      "large":  { "defer": true,  "description": "Multi-file refactor / test suite" },
+      "xl":     { "defer": true,  "description": "Codebase-wide pass / migration" }
+    }
+  }
+}
