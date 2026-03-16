@@ -2,14 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Datelike, NaiveTime, Utc, Weekday};
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::HashMap,
-    fs,
-    io::Read,
-    path::PathBuf,
-    thread,
-    time::Duration,
-};
+use std::{collections::HashMap, fs, io::Read, path::PathBuf, thread, time::Duration};
 
 // ---------------------------------------------------------------------------
 // Window config schema
@@ -55,8 +48,14 @@ struct Tier {
 #[derive(Debug, Deserialize, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Schedule {
-    Recurring { days: Vec<String>, utc_start: String, utc_end: String },
-    InverseRecurring { base: Box<Schedule> },
+    Recurring {
+        days: Vec<String>,
+        utc_start: String,
+        utc_end: String,
+    },
+    InverseRecurring {
+        base: Box<Schedule>,
+    },
     Always,
 }
 
@@ -87,10 +86,14 @@ struct StatuslineInput {
 }
 
 #[derive(Debug, Deserialize)]
-struct StatuslineModel { display_name: String }
+struct StatuslineModel {
+    display_name: String,
+}
 
 #[derive(Debug, Deserialize)]
-struct ContextWindowInfo { used_percentage: Option<f64> }
+struct ContextWindowInfo {
+    used_percentage: Option<f64>,
+}
 
 #[derive(Debug, Deserialize, Default)]
 struct CurrentUsage {
@@ -101,7 +104,9 @@ struct CurrentUsage {
 }
 
 #[derive(Debug, Deserialize)]
-struct CostInfo { total_cost_usd: Option<f64> }
+struct CostInfo {
+    total_cost_usd: Option<f64>,
+}
 
 // ---------------------------------------------------------------------------
 // Usage tracking: persisted daily/weekly token state
@@ -118,9 +123,7 @@ struct UsageState {
 }
 
 fn usage_state_path() -> Option<PathBuf> {
-    std::env::var("CLAUDE_CONFIG_DIR").ok()
-        .or_else(|| std::env::var("HOME").ok().map(|h| format!("{}/.claude", h)))
-        .map(|d| PathBuf::from(d).join("usage-tracker.json"))
+    claude_config_dir().map(|d| d.join("usage-tracker.json"))
 }
 
 fn load_usage_state() -> UsageState {
@@ -131,9 +134,15 @@ fn load_usage_state() -> UsageState {
 }
 
 fn save_usage_state(state: &UsageState) {
-    let Some(path) = usage_state_path() else { return };
-    if let Some(parent) = path.parent() { let _ = fs::create_dir_all(parent); }
-    if let Ok(json) = serde_json::to_string_pretty(state) { let _ = fs::write(path, json); }
+    let Some(path) = usage_state_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(state) {
+        let _ = fs::write(path, json);
+    }
 }
 
 fn iso_week_key(now: DateTime<Utc>) -> String {
@@ -143,22 +152,51 @@ fn iso_week_key(now: DateTime<Utc>) -> String {
 
 fn update_usage(state: &mut UsageState, session_id: &str, new_total: u64, now: DateTime<Utc>) {
     let last = state.sessions.get(session_id).copied().unwrap_or(0);
-    let delta = if new_total >= last { new_total - last } else { new_total };
+    let delta = if new_total >= last {
+        new_total - last
+    } else {
+        new_total
+    };
 
     if delta > 0 {
-        let day  = now.format("%Y-%m-%d").to_string();
+        let day = now.format("%Y-%m-%d").to_string();
         let week = iso_week_key(now);
-        *state.daily.entry(day).or_insert(0)   += delta;
+        *state.daily.entry(day).or_insert(0) += delta;
         *state.weekly.entry(week).or_insert(0) += delta;
     }
 
     state.sessions.insert(session_id.to_string(), new_total);
 
-    // Trim to 50 most-recent sessions
+    // Trim to 50 sessions (arbitrary eviction since HashMap has no order)
     if state.sessions.len() > 50 {
-        let drain: Vec<_> = state.sessions.keys().cloned().take(state.sessions.len() - 25).collect();
-        for k in drain { state.sessions.remove(&k); }
+        let drain: Vec<_> = state
+            .sessions
+            .keys()
+            .take(state.sessions.len() - 25)
+            .cloned()
+            .collect();
+        for k in drain {
+            state.sessions.remove(&k);
+        }
     }
+
+    // Prune old daily (>30 days) and weekly (>12 weeks) entries
+    let cutoff_day = (now - chrono::Duration::days(30))
+        .format("%Y-%m-%d")
+        .to_string();
+    state.daily.retain(|k, _| k.as_str() >= cutoff_day.as_str());
+    let cutoff_week = now - chrono::Duration::weeks(12);
+    let cutoff_week_key = iso_week_key(cutoff_week);
+    state
+        .weekly
+        .retain(|k, _| k.as_str() >= cutoff_week_key.as_str());
+}
+
+fn claude_config_dir() -> Option<PathBuf> {
+    std::env::var("CLAUDE_CONFIG_DIR")
+        .ok()
+        .or_else(|| std::env::var("HOME").ok().map(|h| format!("{}/.claude", h)))
+        .map(PathBuf::from)
 }
 
 // ---------------------------------------------------------------------------
@@ -167,11 +205,16 @@ fn update_usage(state: &mut UsageState, session_id: &str, new_total: u64, now: D
 
 fn config_paths() -> Vec<PathBuf> {
     let mut v = vec![];
-    if let Ok(dir) = std::env::var("CLAUDE_CONFIG_DIR") { v.push(PathBuf::from(dir).join("usage-windows.json")); }
-    if let Ok(cwd) = std::env::current_dir() { v.push(cwd.join(".claude").join("usage-windows.json")); }
-    if let Ok(h) = std::env::var("HOME") { v.push(PathBuf::from(h).join(".claude").join("usage-windows.json")); }
+    if let Some(dir) = claude_config_dir() {
+        v.push(dir.join("usage-windows.json"));
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        v.push(cwd.join(".claude").join("usage-windows.json"));
+    }
     if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() { v.push(dir.join("usage-windows.json")); }
+        if let Some(dir) = exe.parent() {
+            v.push(dir.join("usage-windows.json"));
+        }
     }
     v
 }
@@ -192,28 +235,48 @@ fn load_config() -> Result<Config> {
 
 fn parse_weekday(s: &str) -> Option<Weekday> {
     match s.to_lowercase().as_str() {
-        "sun" => Some(Weekday::Sun), "mon" => Some(Weekday::Mon), "tue" => Some(Weekday::Tue),
-        "wed" => Some(Weekday::Wed), "thu" => Some(Weekday::Thu), "fri" => Some(Weekday::Fri),
-        "sat" => Some(Weekday::Sat), _ => None,
+        "sun" => Some(Weekday::Sun),
+        "mon" => Some(Weekday::Mon),
+        "tue" => Some(Weekday::Tue),
+        "wed" => Some(Weekday::Wed),
+        "thu" => Some(Weekday::Thu),
+        "fri" => Some(Weekday::Fri),
+        "sat" => Some(Weekday::Sat),
+        _ => None,
     }
 }
 
 fn parse_utc_time(hhmm: &str, ref_dt: DateTime<Utc>) -> Result<DateTime<Utc>> {
-    let t = NaiveTime::parse_from_str(hhmm, "%H:%M").with_context(|| format!("bad time: {hhmm}"))?;
+    let t =
+        NaiveTime::parse_from_str(hhmm, "%H:%M").with_context(|| format!("bad time: {hhmm}"))?;
     Ok(ref_dt.date_naive().and_time(t).and_utc())
 }
 
 fn matches_recurring(days: &[String], start: &str, end: &str, t: DateTime<Utc>) -> bool {
     let wd = t.weekday();
-    if !days.iter().filter_map(|d| parse_weekday(d)).any(|d| d == wd) { return false; }
-    let Ok(s) = parse_utc_time(start, t) else { return false };
-    let Ok(e) = parse_utc_time(end,   t) else { return false };
+    if !days
+        .iter()
+        .filter_map(|d| parse_weekday(d))
+        .any(|d| d == wd)
+    {
+        return false;
+    }
+    let Ok(s) = parse_utc_time(start, t) else {
+        return false;
+    };
+    let Ok(e) = parse_utc_time(end, t) else {
+        return false;
+    };
     t >= s && t < e
 }
 
 fn matches_schedule(sched: &Schedule, t: DateTime<Utc>) -> bool {
     match sched {
-        Schedule::Recurring { days, utc_start, utc_end } => matches_recurring(days, utc_start, utc_end, t),
+        Schedule::Recurring {
+            days,
+            utc_start,
+            utc_end,
+        } => matches_recurring(days, utc_start, utc_end, t),
         Schedule::InverseRecurring { base } => !matches_schedule(base, t),
         Schedule::Always => true,
     }
@@ -222,7 +285,9 @@ fn matches_schedule(sched: &Schedule, t: DateTime<Utc>) -> bool {
 fn mins_until_boundary(sched: &Schedule, now: DateTime<Utc>, want_start: bool) -> Option<u32> {
     for i in 1..=(7 * 24 * 60u32) {
         let c = now + chrono::Duration::minutes(i as i64);
-        if want_start == matches_schedule(sched, c) { return Some(i); }
+        if want_start == matches_schedule(sched, c) {
+            return Some(i);
+        }
     }
     None
 }
@@ -233,74 +298,139 @@ fn mins_until_boundary(sched: &Schedule, now: DateTime<Utc>, want_start: bool) -
 
 #[derive(Debug)]
 struct WindowStatus {
-    active: bool, reason: Option<String>, starts_in: Option<u32>,
-    window: UsageWindow, tier: Option<Tier>,
-    multiplier: f64, favorable: bool,
-    mins_until_change: Option<u32>, mins_until_favorable: Option<u32>,
+    active: bool,
+    reason: Option<String>,
+    starts_in: Option<u32>,
+    window: UsageWindow,
+    tier: Option<Tier>,
+    multiplier: f64,
+    favorable: bool,
+    mins_until_change: Option<u32>,
+    mins_until_favorable: Option<u32>,
     promo_ends_in: u32,
 }
 
 #[derive(Debug)]
 struct Status {
     now: DateTime<Utc>,
-    multiplier: f64, favorable: bool,
-    active_windows: Vec<WindowStatus>, inactive_windows: Vec<WindowStatus>,
-    mins_until_favorable: Option<u32>, mins_until_change: Option<u32>,
+    multiplier: f64,
+    favorable: bool,
+    active_windows: Vec<WindowStatus>,
+    inactive_windows: Vec<WindowStatus>,
+    mins_until_favorable: Option<u32>,
+    mins_until_change: Option<u32>,
     thresholds: TaskThresholds,
 }
 
 fn evaluate_window(w: UsageWindow, now: DateTime<Utc>) -> WindowStatus {
     if now < w.active_range.start {
         let starts_in = (w.active_range.start - now).num_minutes().max(0) as u32;
-        return WindowStatus { active: false, reason: Some("not_started".into()), starts_in: Some(starts_in),
-            window: w, tier: None, multiplier: 1.0, favorable: false,
-            mins_until_change: None, mins_until_favorable: None, promo_ends_in: 0 };
+        return WindowStatus {
+            active: false,
+            reason: Some("not_started".into()),
+            starts_in: Some(starts_in),
+            window: w,
+            tier: None,
+            multiplier: 1.0,
+            favorable: false,
+            mins_until_change: None,
+            mins_until_favorable: None,
+            promo_ends_in: 0,
+        };
     }
     if now > w.active_range.end {
-        return WindowStatus { active: false, reason: Some("ended".into()), starts_in: None,
-            window: w, tier: None, multiplier: 1.0, favorable: false,
-            mins_until_change: None, mins_until_favorable: None, promo_ends_in: 0 };
+        return WindowStatus {
+            active: false,
+            reason: Some("ended".into()),
+            starts_in: None,
+            window: w,
+            tier: None,
+            multiplier: 1.0,
+            favorable: false,
+            mins_until_change: None,
+            mins_until_favorable: None,
+            promo_ends_in: 0,
+        };
     }
 
-    let active_tier = w.tiers.iter().find(|t| matches_schedule(&t.schedule, now)).cloned();
-    let multiplier  = active_tier.as_ref().map(|t| t.multiplier).unwrap_or(1.0);
-    let favorable   = active_tier.as_ref().map(|t| t.favorable).unwrap_or(false);
-    let mins_until_change = active_tier.as_ref().and_then(|t| mins_until_boundary(&t.schedule, now, false));
+    let active_tier = w
+        .tiers
+        .iter()
+        .find(|t| matches_schedule(&t.schedule, now))
+        .cloned();
+    let multiplier = active_tier.as_ref().map(|t| t.multiplier).unwrap_or(1.0);
+    let favorable = active_tier.as_ref().map(|t| t.favorable).unwrap_or(false);
+    let mins_until_change = active_tier
+        .as_ref()
+        .and_then(|t| mins_until_boundary(&t.schedule, now, false));
     let mins_until_favorable = if !favorable {
-        w.tiers.iter().find(|t| t.favorable).and_then(|t| mins_until_boundary(&t.schedule, now, true))
-    } else { None };
+        w.tiers
+            .iter()
+            .find(|t| t.favorable)
+            .and_then(|t| mins_until_boundary(&t.schedule, now, true))
+    } else {
+        None
+    };
     let promo_ends_in = (w.active_range.end - now).num_minutes().max(0) as u32;
 
-    WindowStatus { active: true, reason: None, starts_in: None, window: w,
-        tier: active_tier, multiplier, favorable,
-        mins_until_change, mins_until_favorable, promo_ends_in }
+    WindowStatus {
+        active: true,
+        reason: None,
+        starts_in: None,
+        window: w,
+        tier: active_tier,
+        multiplier,
+        favorable,
+        mins_until_change,
+        mins_until_favorable,
+        promo_ends_in,
+    }
 }
 
 fn evaluate(config: Config, now: DateTime<Utc>) -> Status {
-    let mut active = vec![]; let mut inactive = vec![];
-    let mut best_mult = 1.0f64; let mut favorable = false;
+    let mut active = vec![];
+    let mut inactive = vec![];
+    let mut best_mult = 1.0f64;
+    let mut favorable = false;
 
     for w in config.windows {
         let ws = evaluate_window(w, now);
         if ws.active {
-            if ws.multiplier > best_mult { best_mult = ws.multiplier; }
-            if ws.favorable { favorable = true; }
+            if ws.multiplier > best_mult {
+                best_mult = ws.multiplier;
+            }
+            if ws.favorable {
+                favorable = true;
+            }
             active.push(ws);
-        } else { inactive.push(ws); }
+        } else {
+            inactive.push(ws);
+        }
     }
 
     Status {
-        now, multiplier: best_mult, favorable,
-        mins_until_favorable: active.iter().filter(|w| !w.favorable).filter_map(|w| w.mins_until_favorable).min(),
+        now,
+        multiplier: best_mult,
+        favorable,
+        mins_until_favorable: active
+            .iter()
+            .filter(|w| !w.favorable)
+            .filter_map(|w| w.mins_until_favorable)
+            .min(),
         mins_until_change: active.iter().filter_map(|w| w.mins_until_change).min(),
-        active_windows: active, inactive_windows: inactive,
+        active_windows: active,
+        inactive_windows: inactive,
         thresholds: config.task_size_thresholds,
     }
 }
 
 fn should_defer(size: &str, s: &Status) -> bool {
     s.multiplier < s.thresholds.defer_at_multiplier_below
-        && s.thresholds.sizes.get(size).map(|c| c.defer).unwrap_or(false)
+        && s.thresholds
+            .sizes
+            .get(size)
+            .map(|c| c.defer)
+            .unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -310,31 +440,45 @@ fn should_defer(size: &str, s: &Status) -> bool {
 fn fmt_mins(m: u32) -> String {
     match m {
         m if m >= 1440 => format!("{}d {}h", m / 1440, (m % 1440) / 60),
-        m if m >= 60   => format!("{}h {:02}m", m / 60, m % 60),
-        m              => format!("{}m", m),
+        m if m >= 60 => format!("{}h {:02}m", m / 60, m % 60),
+        m => format!("{}m", m),
     }
 }
 
-fn fmt_mins_opt(m: Option<u32>) -> String { m.map(fmt_mins).unwrap_or_else(|| "—".into()) }
+fn fmt_mins_opt(m: Option<u32>) -> String {
+    m.map(fmt_mins).unwrap_or_else(|| "—".into())
+}
 
 fn fmt_tokens(n: u64) -> String {
     match n {
         n if n >= 1_000_000 => format!("{:.1}m", n as f64 / 1_000_000.0),
-        n if n >= 10_000    => format!("{:.0}k", n as f64 / 1_000.0),
-        n if n >= 1_000     => format!("{:.1}k", n as f64 / 1_000.0),
-        n                   => n.to_string(),
+        n if n >= 10_000 => format!("{:.0}k", n as f64 / 1_000.0),
+        n if n >= 1_000 => format!("{:.1}k", n as f64 / 1_000.0),
+        n => n.to_string(),
     }
 }
 
 fn ctx_bar(pct: f64, width: usize) -> String {
     let filled = ((pct / 100.0) * width as f64).round() as usize;
-    format!("{}{}", "█".repeat(filled.min(width)), "░".repeat(width - filled.min(width)))
+    format!(
+        "{}{}",
+        "█".repeat(filled.min(width)),
+        "░".repeat(width - filled.min(width))
+    )
 }
 
-fn ansi(codes: &str, text: &str) -> String { format!("\x1b[{}m{}\x1b[0m", codes, text) }
+fn ansi(codes: &str, text: &str) -> String {
+    format!("\x1b[{}m{}\x1b[0m", codes, text)
+}
 
 fn ctx_colored(pct: f64, text: &str) -> String {
-    if pct < 50.0 { ansi("32", text) } else if pct < 80.0 { ansi("33", text) } else { ansi("31;1", text) }
+    if pct < 50.0 {
+        ansi("32", text)
+    } else if pct < 80.0 {
+        ansi("33", text)
+    } else {
+        ansi("31;1", text)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -381,30 +525,34 @@ enum Cmd {
 fn main() -> Result<()> {
     let cmd = Cli::parse().command.unwrap_or(Cmd::Status);
 
-    if let Cmd::Init = cmd { return run_init(); }
+    if let Cmd::Init = cmd {
+        return run_init();
+    }
 
     let config = match load_config() {
         Ok(c) => c,
         Err(e) => {
             // Stay silent for display-only commands so we don't pollute PS1 / status bar
-            if matches!(cmd, Cmd::Label | Cmd::Tmux | Cmd::Statusline) { return Ok(()); }
+            if matches!(cmd, Cmd::Label | Cmd::Tmux | Cmd::Statusline) {
+                return Ok(());
+            }
             return Err(e);
         }
     };
 
     let now = Utc::now();
-    let s   = evaluate(config, now);
+    let s = evaluate(config, now);
 
     match cmd {
-        Cmd::Status         => run_status(&s),
-        Cmd::Statusline     => run_statusline(&s, now),
-        Cmd::Label          => run_label(&s),
-        Cmd::Tmux           => run_tmux(&s),
-        Cmd::Json           => run_json(&s)?,
-        Cmd::Windows        => run_windows(&s),
-        Cmd::Wait           => run_wait(&s),
+        Cmd::Status => run_status(&s),
+        Cmd::Statusline => run_statusline(&s),
+        Cmd::Label => run_label(&s),
+        Cmd::Tmux => run_tmux(&s),
+        Cmd::Json => run_json(&s)?,
+        Cmd::Windows => run_windows(&s),
+        Cmd::Wait => run_wait(&s),
         Cmd::Defer { size } => run_defer(&s, &size),
-        Cmd::Init           => unreachable!(),
+        Cmd::Init => unreachable!(),
     }
     Ok(())
 }
@@ -420,17 +568,22 @@ fn main() -> Result<()> {
 //        Line 2:              sonnet-4-5 │ ████░░░░ 23% │ sess 12.3k │ day 45.6k │ wk 234k │ $0.024
 // ---------------------------------------------------------------------------
 
-fn run_statusline(s: &Status, now: DateTime<Utc>) {
+fn run_statusline(s: &Status) {
+    let now = s.now;
     let mut raw = String::new();
     let _ = std::io::stdin().read_to_string(&mut raw);
     let cc: StatuslineInput = serde_json::from_str(&raw).unwrap_or_default();
 
-    let session_total = cc.current_usage.as_ref().map(|u| {
-        u.input_tokens.unwrap_or(0)
-            + u.output_tokens.unwrap_or(0)
-            + u.cache_creation_input_tokens.unwrap_or(0)
-            + u.cache_read_input_tokens.unwrap_or(0)
-    }).unwrap_or(0);
+    let session_total = cc
+        .current_usage
+        .as_ref()
+        .map(|u| {
+            u.input_tokens.unwrap_or(0)
+                + u.output_tokens.unwrap_or(0)
+                + u.cache_creation_input_tokens.unwrap_or(0)
+                + u.cache_read_input_tokens.unwrap_or(0)
+        })
+        .unwrap_or(0);
 
     // Update persistent state and retrieve today/week totals
     let mut state = load_usage_state();
@@ -439,23 +592,33 @@ fn run_statusline(s: &Status, now: DateTime<Utc>) {
         update_usage(&mut state, sid, session_total, now);
         save_usage_state(&state);
     }
-    let day_key   = now.format("%Y-%m-%d").to_string();
-    let week_key  = iso_week_key(now);
+    let day_key = now.format("%Y-%m-%d").to_string();
+    let week_key = iso_week_key(now);
     let day_total = state.daily.get(&day_key).copied().unwrap_or(0);
     let week_total = state.weekly.get(&week_key).copied().unwrap_or(0);
 
     // ── Line 1: promo/peak status (omitted when no window is active) ──────────
     if !s.active_windows.is_empty() {
         if s.favorable {
-            println!("{} {}  ends in {}",
+            println!(
+                "{} {}  ends in {}",
                 ansi("32;1", &format!("⚡{:.0}x", s.multiplier)),
                 ansi("32;1", "OFF-PEAK"),
-                fmt_mins_opt(s.mins_until_change));
+                fmt_mins_opt(s.mins_until_change)
+            );
         } else {
-            println!("{} {}  2x in {}",
+            println!(
+                "{} {}  {:.0}x in {}",
                 ansi("33;1", &format!("·{:.0}x", s.multiplier)),
                 ansi("33;1", "PEAK"),
-                fmt_mins_opt(s.mins_until_favorable));
+                s.active_windows
+                    .iter()
+                    .filter(|w| w.favorable)
+                    .map(|w| w.multiplier)
+                    .next()
+                    .unwrap_or(2.0),
+                fmt_mins_opt(s.mins_until_favorable)
+            );
         }
     }
 
@@ -464,29 +627,44 @@ fn run_statusline(s: &Status, now: DateTime<Utc>) {
 
     if let Some(ref m) = cc.model {
         // "claude-sonnet-4-5-20251022" → "sonnet-4-5"
-        let name = m.display_name
-            .strip_prefix("claude-").unwrap_or(&m.display_name)
-            .splitn(4, '-').take(3).collect::<Vec<_>>().join("-");
+        let name = m
+            .display_name
+            .strip_prefix("claude-")
+            .unwrap_or(&m.display_name)
+            .splitn(4, '-')
+            .take(3)
+            .collect::<Vec<_>>()
+            .join("-");
         parts.push(ansi("36;1", &name));
     }
 
     if let Some(pct) = cc.context_window.as_ref().and_then(|c| c.used_percentage) {
         if pct > 0.0 {
-            let bar  = ctx_bar(pct, 8);
+            let bar = ctx_bar(pct, 8);
             let text = format!("{} {:.0}%", bar, pct);
             parts.push(ctx_colored(pct, &text));
         }
     }
 
-    if session_total > 0 { parts.push(format!("sess {}",  fmt_tokens(session_total))); }
-    if day_total    > 0  { parts.push(format!("day {}",   fmt_tokens(day_total)));     }
-    if week_total   > 0  { parts.push(format!("wk {}",    fmt_tokens(week_total)));    }
-
-    if let Some(cost) = cc.cost.as_ref().and_then(|c| c.total_cost_usd) {
-        if cost > 0.001 { parts.push(ansi("90", &format!("${:.3}", cost))); }
+    if session_total > 0 {
+        parts.push(format!("sess {}", fmt_tokens(session_total)));
+    }
+    if day_total > 0 {
+        parts.push(format!("day {}", fmt_tokens(day_total)));
+    }
+    if week_total > 0 {
+        parts.push(format!("wk {}", fmt_tokens(week_total)));
     }
 
-    if !parts.is_empty() { println!("{}", parts.join(" │ ")); }
+    if let Some(cost) = cc.cost.as_ref().and_then(|c| c.total_cost_usd) {
+        if cost > 0.001 {
+            parts.push(ansi("90", &format!("${:.3}", cost)));
+        }
+    }
+
+    if !parts.is_empty() {
+        println!("{}", parts.join(" │ "));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -498,84 +676,156 @@ fn run_status(s: &Status) {
         println!("No active Claude usage promotions. Standard rates apply.");
         for w in &s.inactive_windows {
             if w.reason.as_deref() == Some("not_started") {
-                println!("Next: {}, starts in {}", w.window.label, fmt_mins_opt(w.starts_in));
+                println!(
+                    "Next: {}, starts in {}",
+                    w.window.label,
+                    fmt_mins_opt(w.starts_in)
+                );
             }
         }
         return;
     }
     for w in &s.active_windows {
-        let t = w.tier.as_ref().map(|t| t.label.as_str()).unwrap_or("unknown");
+        let t = w
+            .tier
+            .as_ref()
+            .map(|t| t.label.as_str())
+            .unwrap_or("unknown");
         if w.favorable {
-            println!("🟢 {} ({:.0}x usage)\n   Ends in:      {}", t, w.multiplier, fmt_mins_opt(w.mins_until_change));
+            println!(
+                "🟢 {} ({:.0}x usage)\n   Ends in:      {}",
+                t,
+                w.multiplier,
+                fmt_mins_opt(w.mins_until_change)
+            );
         } else {
-            println!("🔴 {} ({:.0}x usage)\n   Favorable in: {}", t, w.multiplier, fmt_mins_opt(w.mins_until_favorable));
+            println!(
+                "🔴 {} ({:.0}x usage)\n   Favorable in: {}",
+                t,
+                w.multiplier,
+                fmt_mins_opt(w.mins_until_favorable)
+            );
         }
-        println!("   Promo: {} (ends in {})", w.window.label, fmt_mins(w.promo_ends_in));
+        println!(
+            "   Promo: {} (ends in {})",
+            w.window.label,
+            fmt_mins(w.promo_ends_in)
+        );
     }
 }
 
 fn run_label(s: &Status) {
-    if s.active_windows.is_empty() { return; }
-    print!("{}{:.0}x", if s.favorable { "⚡" } else { "·" }, s.multiplier);
+    if s.active_windows.is_empty() {
+        return;
+    }
+    print!(
+        "{}{:.0}x",
+        if s.favorable { "⚡" } else { "·" },
+        s.multiplier
+    );
 }
 
 fn run_tmux(s: &Status) {
-    if s.active_windows.is_empty() { return; }
+    if s.active_windows.is_empty() {
+        return;
+    }
     if s.favorable {
-        print!("#[fg=colour46,bold]⚡{:.0}x#[fg=colour244] Claude#[default]", s.multiplier);
+        print!(
+            "#[fg=colour46,bold]⚡{:.0}x#[fg=colour244] Claude#[default]",
+            s.multiplier
+        );
     } else {
-        print!("#[fg=colour208,bold]·{:.0}x#[fg=colour244] ({})#[default]", s.multiplier, fmt_mins_opt(s.mins_until_favorable));
+        print!(
+            "#[fg=colour208,bold]·{:.0}x#[fg=colour244] ({})#[default]",
+            s.multiplier,
+            fmt_mins_opt(s.mins_until_favorable)
+        );
     }
 }
 
 fn run_json(s: &Status) -> Result<()> {
     #[derive(Serialize)]
-    struct Out { now: String, multiplier: f64, favorable: bool,
-        mins_until_favorable: Option<u32>, mins_until_change: Option<u32>,
-        active_windows: Vec<WinOut>, inactive_windows: Vec<WinOut> }
+    struct Out {
+        now: String,
+        multiplier: f64,
+        favorable: bool,
+        mins_until_favorable: Option<u32>,
+        mins_until_change: Option<u32>,
+        active_windows: Vec<WinOut>,
+        inactive_windows: Vec<WinOut>,
+    }
     #[derive(Serialize)]
-    struct WinOut { id: String, label: String, multiplier: f64, favorable: bool,
-        tier_label: Option<String>, mins_until_change: Option<u32>,
-        mins_until_favorable: Option<u32>, promo_ends_in_mins: u32, source: String }
+    struct WinOut {
+        id: String,
+        label: String,
+        multiplier: f64,
+        favorable: bool,
+        tier_label: Option<String>,
+        mins_until_change: Option<u32>,
+        mins_until_favorable: Option<u32>,
+        promo_ends_in_mins: u32,
+        source: String,
+    }
     let to_w = |w: &WindowStatus| WinOut {
-        id: w.window.id.clone(), label: w.window.label.clone(),
-        multiplier: w.multiplier, favorable: w.favorable,
+        id: w.window.id.clone(),
+        label: w.window.label.clone(),
+        multiplier: w.multiplier,
+        favorable: w.favorable,
         tier_label: w.tier.as_ref().map(|t| t.label.clone()),
-        mins_until_change: w.mins_until_change, mins_until_favorable: w.mins_until_favorable,
-        promo_ends_in_mins: w.promo_ends_in, source: w.window.source.clone(),
+        mins_until_change: w.mins_until_change,
+        mins_until_favorable: w.mins_until_favorable,
+        promo_ends_in_mins: w.promo_ends_in,
+        source: w.window.source.clone(),
     };
-    println!("{}", serde_json::to_string_pretty(&Out {
-        now: s.now.to_rfc3339(), multiplier: s.multiplier, favorable: s.favorable,
-        mins_until_favorable: s.mins_until_favorable, mins_until_change: s.mins_until_change,
-        active_windows: s.active_windows.iter().map(to_w).collect(),
-        inactive_windows: s.inactive_windows.iter().map(to_w).collect(),
-    })?);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&Out {
+            now: s.now.to_rfc3339(),
+            multiplier: s.multiplier,
+            favorable: s.favorable,
+            mins_until_favorable: s.mins_until_favorable,
+            mins_until_change: s.mins_until_change,
+            active_windows: s.active_windows.iter().map(to_w).collect(),
+            inactive_windows: s.inactive_windows.iter().map(to_w).collect(),
+        })?
+    );
     Ok(())
 }
 
 fn run_windows(s: &Status) {
     if s.active_windows.is_empty() && s.inactive_windows.is_empty() {
-        println!("No windows configured. Run: claude-usage init"); return;
+        println!("No windows configured. Run: claude-usage init");
+        return;
     }
     for w in &s.active_windows {
-        let tier = w.tier.as_ref().map(|t| format!("{} ({:.0}x)", t.label, t.multiplier)).unwrap_or_else(|| "—".into());
+        let tier = w
+            .tier
+            .as_ref()
+            .map(|t| format!("{} ({:.0}x)", t.label, t.multiplier))
+            .unwrap_or_else(|| "—".into());
         println!("[ACTIVE]   {}\n           Tier: {}", w.window.label, tier);
-        if !w.window.source.is_empty() { println!("           Ref:  {}", w.window.source); }
+        if !w.window.source.is_empty() {
+            println!("           Ref:  {}", w.window.source);
+        }
         println!();
     }
     for w in &s.inactive_windows {
         let state = match w.reason.as_deref() {
             Some("not_started") => format!("STARTS IN {}", fmt_mins_opt(w.starts_in)),
-            Some(r) => r.to_uppercase(), None => "UNKNOWN".into(),
+            Some(r) => r.to_uppercase(),
+            None => "UNKNOWN".into(),
         };
         println!("[{:<22}]  {}", state, w.window.label);
     }
 }
 
 fn run_wait(s: &Status) {
-    if s.favorable { eprintln!("✅ Already in favorable window."); return; }
+    if s.favorable {
+        eprintln!("✅ Already in favorable window.");
+        return;
+    }
     match s.mins_until_favorable {
-        None    => eprintln!("ℹ️  No favorable window scheduled."),
+        None => eprintln!("ℹ️  No favorable window scheduled."),
         Some(m) => {
             eprintln!("⏳ Waiting {} for favorable window...", fmt_mins(m));
             thread::sleep(Duration::from_secs(m as u64 * 60 + 30));
@@ -587,24 +837,31 @@ fn run_wait(s: &Status) {
 fn run_defer(s: &Status, size: &str) {
     if should_defer(size, s) {
         println!("⏸️  DEFER RECOMMENDED: {} at {:.0}x", size, s.multiplier);
-        if let Some(m) = s.mins_until_favorable { println!("   Favorable window in: {}", fmt_mins(m)); }
+        if let Some(m) = s.mins_until_favorable {
+            println!("   Favorable window in: {}", fmt_mins(m));
+        }
     } else {
-        let reason = if s.multiplier >= s.thresholds.defer_at_multiplier_below
-            { "already in favorable window" } else { "size not worth deferring" };
+        let reason = if s.multiplier >= s.thresholds.defer_at_multiplier_below {
+            "already in favorable window"
+        } else {
+            "size not worth deferring"
+        };
         println!("✅ PROCEED: {} at {:.0}x ({})", size, s.multiplier, reason);
     }
 }
 
 fn run_init() -> Result<()> {
-    let claude_dir = std::env::var("CLAUDE_CONFIG_DIR").map(PathBuf::from)
-        .or_else(|_| std::env::var("HOME").map(|h| PathBuf::from(h).join(".claude")))
-        .map_err(|_| anyhow!("neither CLAUDE_CONFIG_DIR nor HOME is set"))?;
+    let claude_dir =
+        claude_config_dir().ok_or_else(|| anyhow!("neither CLAUDE_CONFIG_DIR nor HOME is set"))?;
     fs::create_dir_all(&claude_dir)?;
 
     // 1. Write windows.json
     let windows_dest = claude_dir.join("usage-windows.json");
     if windows_dest.exists() {
-        println!("Config exists: {} (not overwritten)", windows_dest.display());
+        println!(
+            "Config exists: {} (not overwritten)",
+            windows_dest.display()
+        );
     } else {
         fs::write(&windows_dest, DEFAULT_WINDOWS_JSON)?;
         println!("Initialized:   {}", windows_dest.display());
@@ -612,11 +869,17 @@ fn run_init() -> Result<()> {
 
     // 2. Register as statusLine in ~/.claude/settings.json (non-destructive merge)
     let settings_path = claude_dir.join("settings.json");
-    let raw = if settings_path.exists() { fs::read_to_string(&settings_path)? } else { "{}".into() };
-    let mut settings: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::json!({}));
+    let raw = if settings_path.exists() {
+        fs::read_to_string(&settings_path)?
+    } else {
+        "{}".into()
+    };
+    let mut settings: serde_json::Value =
+        serde_json::from_str(&raw).unwrap_or(serde_json::json!({}));
 
     if settings.get("statusLine").is_none() {
-        settings["statusLine"] = serde_json::json!({ "type": "command", "command": "claude-usage statusline" });
+        settings["statusLine"] =
+            serde_json::json!({ "type": "command", "command": "claude-usage statusline" });
         fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
         println!("statusLine registered in: {}", settings_path.display());
     } else {
