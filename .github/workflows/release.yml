@@ -101,14 +101,17 @@ jobs:
           cat checksums.txt | sort > checksums-final.txt
           mv checksums-final.txt checksums.txt
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            claude-usage-*.tar.gz
-            checksums.txt
-          generate_release_notes: true
-          fail_on_unmatched_files: true
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          gh release view "$TAG_NAME" >/dev/null 2>&1 || \
+            gh release create "$TAG_NAME" --title "$TAG_NAME" --generate-notes
+          gh release upload "$TAG_NAME" \
+            claude-usage-*.tar.gz \
+            checksums.txt \
+            --clobber
 
       - name: Update Homebrew formula
         env:
