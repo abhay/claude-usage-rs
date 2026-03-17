@@ -382,6 +382,104 @@ fn get_api_status_forced() -> Option<ApiStatus> {
 }
 
 // ---------------------------------------------------------------------------
+// Direct API connectivity probe (detects 5xx errors not on status page)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ApiConnectivityCache {
+    checked_at: String,
+    http_status: u16,
+}
+
+impl ApiConnectivityCache {
+    fn is_server_error(&self) -> bool {
+        self.http_status >= 500
+    }
+
+    /// Labels matching Anthropic's documented error types.
+    fn error_label(&self) -> &'static str {
+        match self.http_status {
+            529 => "overloaded",     // overloaded_error
+            500 => "internal error", // api_error
+            502 => "bad gateway",
+            503 => "unavailable",
+            _ if self.http_status >= 500 => "server error",
+            _ => "ok",
+        }
+    }
+
+    /// Formatted display: "overloaded (529)"
+    fn display(&self) -> String {
+        format!("{} ({})", self.error_label(), self.http_status)
+    }
+}
+
+fn api_connectivity_cache_path() -> Option<PathBuf> {
+    claude_config_dir().map(|d| d.join("api-connectivity-cache.json"))
+}
+
+fn load_api_connectivity_cache() -> Option<ApiConnectivityCache> {
+    let path = api_connectivity_cache_path()?;
+    let data = fs::read_to_string(path).ok()?;
+    serde_json::from_str(&data).ok()
+}
+
+fn save_api_connectivity_cache(cache: &ApiConnectivityCache) {
+    let Some(path) = api_connectivity_cache_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(cache) {
+        let _ = fs::write(path, json);
+    }
+}
+
+fn connectivity_cache_age_secs(cache: &ApiConnectivityCache) -> i64 {
+    cache
+        .checked_at
+        .parse::<DateTime<Utc>>()
+        .map(|t| (Utc::now() - t).num_seconds())
+        .unwrap_or(i64::MAX)
+}
+
+/// Probe the API endpoint directly to detect 5xx server errors.
+/// Uses a short timeout to avoid blocking the statusline.
+fn probe_api_connectivity() -> Option<ApiConnectivityCache> {
+    let resp = ureq::get("https://api.anthropic.com/v1/messages")
+        .timeout(Duration::from_millis(1500))
+        .call();
+    let http_status = match &resp {
+        Ok(r) => r.status(),
+        Err(ureq::Error::Status(code, _)) => *code,
+        Err(_) => return None, // network error, can't determine
+    };
+    let cache = ApiConnectivityCache {
+        checked_at: Utc::now().to_rfc3339(),
+        http_status,
+    };
+    save_api_connectivity_cache(&cache);
+    Some(cache)
+}
+
+/// Read from cache only (for latency-sensitive paths like statusline).
+fn get_api_connectivity_cached() -> Option<ApiConnectivityCache> {
+    load_api_connectivity_cache()
+}
+
+/// Refresh if stale (60s TTL), fall back to stale cache on probe failure.
+fn get_api_connectivity_fresh() -> Option<ApiConnectivityCache> {
+    let cached = load_api_connectivity_cache();
+    if let Some(ref c) = cached {
+        if connectivity_cache_age_secs(c) <= 60 {
+            return cached;
+        }
+    }
+    probe_api_connectivity().or(cached)
+}
+
+// ---------------------------------------------------------------------------
 // Config loading
 // ---------------------------------------------------------------------------
 
@@ -791,19 +889,24 @@ fn run_statusline(s: &Status) {
     let day_total = state.daily.get(&day_key).copied().unwrap_or(0);
     let week_total = state.weekly.get(&week_key).copied().unwrap_or(0);
 
-    // ── Line 1: promo/peak status + connectivity/incident (cache-read only) ─
+    // ── Line 1: promo/peak status + connectivity/incident ─────────────────
     let api = get_api_status_cached();
-    let suffix = match &api {
-        Some(s) if s.has_incident() => {
-            let icon = match s.indicator.as_str() {
-                "critical" => "⛔",
-                "major" => "⚠️",
-                _ => "⚠",
-            };
-            ansi("31;1", &format!("  {} {}", icon, s.description))
+    let conn = get_api_connectivity_cached();
+    let suffix = if let Some(c) = conn.as_ref().filter(|c| c.is_server_error()) {
+        ansi("31;1", &format!("  ⚠️ API {}", c.display()))
+    } else {
+        match &api {
+            Some(s) if s.has_incident() => {
+                let icon = match s.indicator.as_str() {
+                    "critical" => "⛔",
+                    "major" => "⚠️",
+                    _ => "⚠",
+                };
+                ansi("31;1", &format!("  {} {}", icon, s.description))
+            }
+            Some(s) if !s.online => ansi("90", "  📡?"),
+            _ => String::new(),
         }
-        Some(s) if !s.online => ansi("90", "  📡?"),
-        _ => String::new(),
     };
 
     if !s.active_windows.is_empty() {
@@ -899,16 +1002,24 @@ fn fmt_api_status_line(status: &ApiStatus) -> String {
 }
 
 fn run_api_status() {
-    match get_api_status_forced() {
-        Some(status) => println!("{}", fmt_api_status_line(&status)),
-        None => println!("⚪ API: Unable to fetch status (no connection, no cache)"),
+    let status = get_api_status_forced();
+    let conn = probe_api_connectivity();
+
+    match (&status, &conn) {
+        (_, Some(c)) if c.is_server_error() => println!("🟠 API {}", c.display()),
+        (Some(s), _) => println!("{}", fmt_api_status_line(s)),
+        (None, Some(_)) => println!("🟢 API endpoint responding (status page unavailable)"),
+        (None, None) => println!("⚪ API: Unable to reach status page or API endpoint"),
     }
 }
 
 fn run_status(s: &Status) {
-    // API status
-    if let Some(status) = get_api_status_fresh() {
-        println!("{}", fmt_api_status_line(&status));
+    let status = get_api_status_fresh();
+    let conn = get_api_connectivity_fresh();
+    match (&status, &conn) {
+        (_, Some(c)) if c.is_server_error() => println!("🟠 API {}", c.display()),
+        (Some(s), _) => println!("{}", fmt_api_status_line(s)),
+        _ => {}
     }
 
     if s.active_windows.is_empty() {
@@ -1000,6 +1111,8 @@ fn run_json(s: &Status) -> Result<()> {
         description: String,
         online: bool,
         age_secs: i64,
+        api_server_error: bool,
+        api_http_status: Option<u16>,
     }
     #[derive(Serialize)]
     struct WinOut {
@@ -1024,11 +1137,18 @@ fn run_json(s: &Status) -> Result<()> {
         promo_ends_in_mins: w.promo_ends_in,
         source: w.window.source.clone(),
     };
+    let conn = get_api_connectivity_fresh();
+    let is_5xx = conn.as_ref().is_some_and(|c| c.is_server_error());
     let api_status = get_api_status_fresh().map(|s| ApiStatusOut {
         indicator: s.indicator,
         description: s.description,
         online: s.online,
         age_secs: s.age_secs,
+        api_server_error: is_5xx,
+        api_http_status: conn
+            .as_ref()
+            .filter(|c| c.is_server_error())
+            .map(|c| c.http_status),
     });
     println!(
         "{}",
@@ -1211,10 +1331,16 @@ fn run_mcp() -> Result<()> {
                     };
 
                     let api_status = get_api_status_fresh();
-                    let api_warning = api_status
-                        .as_ref()
-                        .filter(|s| s.has_incident())
-                        .map(|s| format!("API {}: {}", s.indicator, s.description));
+                    let mcp_conn = get_api_connectivity_fresh();
+                    let mcp_5xx = mcp_conn.as_ref().filter(|c| c.is_server_error());
+                    let api_warning = if let Some(c) = mcp_5xx {
+                        Some(format!("API {}", c.display()))
+                    } else {
+                        api_status
+                            .as_ref()
+                            .filter(|s| s.has_incident())
+                            .map(|s| format!("API {}: {}", s.indicator, s.description))
+                    };
 
                     let result = serde_json::json!({
                         "defer": defer,
@@ -1223,6 +1349,8 @@ fn run_mcp() -> Result<()> {
                         "favorable_in_mins": s.mins_until_favorable,
                         "api_status": api_status.as_ref().map(|s| &s.indicator),
                         "api_status_warning": api_warning,
+                        "api_server_error": mcp_5xx.is_some(),
+                        "api_http_status": mcp_5xx.map(|c| c.http_status),
                         "online": api_status.as_ref().map(|s| s.online),
                     });
 

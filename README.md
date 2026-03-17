@@ -25,6 +25,12 @@ $ claude-usage
    Promo: March 2026 2x Promo (ends in 12d 1h)
 ```
 
+**API degraded (5xx detected via direct probe):**
+```
+$ claude-usage api-status
+🟠 API overloaded (529)
+```
+
 **Defer decision:**
 ```
 $ claude-usage defer large
@@ -67,7 +73,7 @@ CLAUDE_CONFIG_DIR=~/.claude-work claude-usage init
 
 ```sh
 claude-usage              # human-readable status (includes API health)
-claude-usage api-status   # check Anthropic API status
+claude-usage api-status   # check Anthropic API status (status page + direct probe)
 claude-usage label        # compact PS1/Starship token: ⚡2x
 claude-usage tmux         # tmux status bar segment
 claude-usage statusline   # Claude Code status bar (reads JSON from stdin)
