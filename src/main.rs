@@ -336,13 +336,6 @@ fn to_api_status(cache: &ApiStatusCache, online: bool) -> ApiStatus {
     }
 }
 
-/// Read from cache only (for latency-sensitive paths like statusline).
-fn get_api_status_cached() -> Option<ApiStatus> {
-    let cache = load_cached_api_status()?;
-    let age = cache_age_secs(&cache);
-    Some(to_api_status(&cache, age <= 300))
-}
-
 /// Try to fetch, respecting backoff. Returns true=online if succeeded.
 fn try_fetch() -> Option<ApiStatusCache> {
     if should_skip_fetch() {
@@ -890,19 +883,19 @@ fn run_statusline(s: &Status) {
     let week_total = state.weekly.get(&week_key).copied().unwrap_or(0);
 
     // ── Line 1: promo/peak status + connectivity/incident ─────────────────
-    let api = get_api_status_cached();
+    let api = get_api_status_fresh();
     let conn = get_api_connectivity_cached();
     let suffix = if let Some(c) = conn.as_ref().filter(|c| c.is_server_error()) {
         ansi("31;1", &format!("  ⚠️ API {}", c.display()))
     } else {
         match &api {
             Some(s) if s.has_incident() => {
-                let icon = match s.indicator.as_str() {
-                    "critical" => "⛔",
-                    "major" => "⚠️",
-                    _ => "⚠",
+                let (icon, color) = match s.indicator.as_str() {
+                    "critical" => ("⛔", "31;1"),
+                    "major" => ("⚠️", "33;1"),
+                    _ => ("⚠", "33"),
                 };
-                ansi("31;1", &format!("  {} {}", icon, s.description))
+                ansi(color, &format!("  {} {}", icon, s.description))
             }
             Some(s) if !s.online => ansi("90", "  📡?"),
             _ => String::new(),
