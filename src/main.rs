@@ -89,6 +89,7 @@ struct StatuslineInput {
     model: Option<StatuslineModel>,
     context_window: Option<ContextWindowInfo>,
     cost: Option<CostInfo>,
+    rate_limits: Option<RateLimits>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -113,6 +114,18 @@ struct CurrentUsage {
 #[derive(Debug, Deserialize)]
 struct CostInfo {
     total_cost_usd: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct RateLimits {
+    five_hour: Option<RateLimitWindow>,
+    seven_day: Option<RateLimitWindow>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RateLimitWindow {
+    used_percentage: Option<f64>,
+    resets_at: Option<i64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -211,25 +224,53 @@ fn claude_config_dir() -> Option<PathBuf> {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+struct ComponentStatus {
+    name: String,
+    status: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct IncidentInfo {
+    name: String,
+    impact: String,
+    status: String,
+    shortlink: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct MaintenanceInfo {
+    name: String,
+    scheduled_for: String,
+    scheduled_until: String,
+    status: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct ApiStatusCache {
     fetched_at: String,
     indicator: String,
     description: String,
-    /// ISO 8601 timestamp: don't attempt fetch before this time.
     #[serde(default)]
     next_retry_at: Option<String>,
-    /// Consecutive fetch failures (reset to 0 on success).
     #[serde(default)]
     consecutive_failures: u32,
+    #[serde(default)]
+    components: Vec<ComponentStatus>,
+    #[serde(default)]
+    incidents: Vec<IncidentInfo>,
+    #[serde(default)]
+    scheduled_maintenances: Vec<MaintenanceInfo>,
 }
 
-/// Resolved status with connectivity context.
 #[derive(Debug, Clone)]
 struct ApiStatus {
     indicator: String,
     description: String,
     age_secs: i64,
-    online: bool, // true = fresh fetch succeeded (or cache < 5 min)
+    online: bool,
+    components: Vec<ComponentStatus>,
+    incidents: Vec<IncidentInfo>,
+    scheduled_maintenances: Vec<MaintenanceInfo>,
 }
 
 impl ApiStatus {
@@ -300,7 +341,7 @@ fn record_fetch_failure() {
 }
 
 fn fetch_api_status_raw() -> Option<ApiStatusCache> {
-    let body_str = ureq::get("https://status.anthropic.com/api/v2/status.json")
+    let body_str = ureq::get("https://status.claude.com/api/v2/summary.json")
         .timeout(Duration::from_secs(5))
         .call()
         .ok()?
@@ -308,6 +349,90 @@ fn fetch_api_status_raw() -> Option<ApiStatusCache> {
         .ok()?;
     let body: serde_json::Value = serde_json::from_str(&body_str).ok()?;
     let status = body.get("status")?;
+
+    let relevant_components = ["Claude API", "Claude Code"];
+    let components: Vec<ComponentStatus> = body
+        .get("components")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|c| {
+                    let name = c.get("name")?.as_str()?;
+                    if relevant_components.contains(&name) {
+                        Some(ComponentStatus {
+                            name: name.to_string(),
+                            status: c
+                                .get("status")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown")
+                                .to_string(),
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let incidents: Vec<IncidentInfo> = body
+        .get("incidents")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|i| {
+                    Some(IncidentInfo {
+                        name: i.get("name")?.as_str()?.to_string(),
+                        impact: i
+                            .get("impact")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("none")
+                            .to_string(),
+                        status: i
+                            .get("status")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown")
+                            .to_string(),
+                        shortlink: i
+                            .get("shortlink")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let scheduled_maintenances: Vec<MaintenanceInfo> = body
+        .get("scheduled_maintenances")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| {
+                    Some(MaintenanceInfo {
+                        name: m.get("name")?.as_str()?.to_string(),
+                        scheduled_for: m
+                            .get("scheduled_for")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        scheduled_until: m
+                            .get("scheduled_until")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        status: m
+                            .get("status")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown")
+                            .to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     let cache = ApiStatusCache {
         fetched_at: Utc::now().to_rfc3339(),
         indicator: status
@@ -322,6 +447,9 @@ fn fetch_api_status_raw() -> Option<ApiStatusCache> {
             .to_string(),
         next_retry_at: None,
         consecutive_failures: 0,
+        components,
+        incidents,
+        scheduled_maintenances,
     };
     save_api_status_cache(&cache);
     Some(cache)
@@ -333,6 +461,9 @@ fn to_api_status(cache: &ApiStatusCache, online: bool) -> ApiStatus {
         description: cache.description.clone(),
         age_secs: cache_age_secs(cache),
         online,
+        components: cache.components.clone(),
+        incidents: cache.incidents.clone(),
+        scheduled_maintenances: cache.scheduled_maintenances.clone(),
     }
 }
 
@@ -895,7 +1026,12 @@ fn run_statusline(s: &Status) {
                     "major" => ("⚠️", "33;1"),
                     _ => ("⚠", "33"),
                 };
-                ansi(color, &format!("  {} {}", icon, s.description))
+                let label = s
+                    .incidents
+                    .first()
+                    .map(|i| i.name.as_str())
+                    .unwrap_or(s.description.as_str());
+                ansi(color, &format!("  {} {}", icon, label))
             }
             Some(s) if !s.online => ansi("90", "  📡?"),
             _ => String::new(),
@@ -947,26 +1083,57 @@ fn run_statusline(s: &Status) {
     }
 
     if let Some(pct) = cc.context_window.as_ref().and_then(|c| c.used_percentage) {
-        if pct > 0.0 {
+        if pct > 10.0 {
             let bar = ctx_bar(pct, 8);
-            let text = format!("{} {:.0}%", bar, pct);
+            let text = format!("ctx {} {:.0}%", bar, pct);
             parts.push(ctx_colored(pct, &text));
+        } else if pct > 0.0 {
+            parts.push(ctx_colored(pct, &format!("ctx {:.0}%", pct)));
         }
     }
 
-    if session_total > 0 {
-        parts.push(format!("sess {}", fmt_tokens(session_total)));
-    }
     if day_total > 0 {
-        parts.push(format!("day {}", fmt_tokens(day_total)));
+        parts.push(format!("d {}", fmt_tokens(day_total)));
     }
     if week_total > 0 {
-        parts.push(format!("wk {}", fmt_tokens(week_total)));
+        parts.push(format!("w {}", fmt_tokens(week_total)));
     }
 
     if let Some(cost) = cc.cost.as_ref().and_then(|c| c.total_cost_usd) {
         if cost > 0.001 {
             parts.push(ansi("90", &format!("~${:.2}", cost)));
+        }
+    }
+
+    if let Some(ref rl) = cc.rate_limits {
+        let now_ts = now.timestamp();
+        for (label, window) in [("5h", &rl.five_hour), ("7d", &rl.seven_day)] {
+            if let Some(w) = window {
+                if let Some(pct) = w.used_percentage {
+                    if pct > 50.0 {
+                        let bar = ctx_bar(pct, 8);
+                        let reset_suffix = if pct > 80.0 {
+                            w.resets_at
+                                .filter(|&ts| ts > now_ts)
+                                .map(|ts| {
+                                    let mins = (ts - now_ts) / 60;
+                                    if mins >= 60 {
+                                        format!(" ↻{}h{}m", mins / 60, mins % 60)
+                                    } else {
+                                        format!(" ↻{}m", mins)
+                                    }
+                                })
+                                .unwrap_or_default()
+                        } else {
+                            String::new()
+                        };
+                        let text = format!("{} {} {:.0}%{}", label, bar, pct, reset_suffix);
+                        parts.push(ctx_colored(pct, &text));
+                    } else {
+                        parts.push(ctx_colored(pct, &format!("{} {:.0}%", label, pct)));
+                    }
+                }
+            }
         }
     }
 
@@ -982,16 +1149,41 @@ fn run_statusline(s: &Status) {
 fn fmt_api_status_line(status: &ApiStatus) -> String {
     let age = status.age_label();
     let conn = if status.online { "" } else { " (offline)" };
+    let mut lines = Vec::new();
+
     if status.has_incident() {
         let icon = match status.indicator.as_str() {
             "critical" => "🔴",
             "major" => "🟠",
             _ => "🟡",
         };
-        format!("{} API: {} ({}){}", icon, status.description, age, conn)
+        lines.push(format!(
+            "{} API: {} ({}){}",
+            icon, status.description, age, conn
+        ));
     } else {
-        format!("🟢 API: {} ({}){}", status.description, age, conn)
+        lines.push(format!("🟢 API: {} ({}){}", status.description, age, conn));
     }
+
+    for inc in &status.incidents {
+        lines.push(format!("  ⚡ {} [{}]", inc.name, inc.impact));
+    }
+
+    for comp in &status.components {
+        if comp.status != "operational" {
+            let display = comp.status.replace('_', " ");
+            lines.push(format!("  ↳ {}: {}", comp.name, display));
+        }
+    }
+
+    for maint in &status.scheduled_maintenances {
+        lines.push(format!(
+            "  🔧 Maintenance: {} ({})",
+            maint.name, maint.scheduled_for
+        ));
+    }
+
+    lines.join("\n")
 }
 
 fn run_api_status() {

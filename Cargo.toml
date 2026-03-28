@@ -1,8 +1,8 @@
 [package]
 name = "claude-usage"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
-description = "CLI for tracking Claude usage windows: status bar, token tracking, API status, defer logic"
+description = "CLI for tracking Claude usage windows, rate limits, and API health: status bar, token tracking, defer logic"
 license = "MIT"
 repository = "https://github.com/abhay/claude-usage-rs"
 readme = "README.md"

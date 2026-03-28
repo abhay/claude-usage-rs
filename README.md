@@ -2,18 +2,24 @@
 
 ![claude-usage statusline](assets/statusline.png)
 
-Tracks Claude promotional usage windows so you know when you're getting 2x and when you're not.
+Tracks Claude usage windows, rate limits, and API health. Bolts onto your shell prompt, tmux, and Claude Code status bar.
 
-Anthropic is running a promo currently (at the time of writing this tool) where you have access to "doubled usage outside peak hours." This tool watches the clock and bolts onto your shell prompt, tmux, and Claude Code status bar.
+Shows promotional multipliers (2x off-peak, etc.), 5-hour and 7-day rate limit usage with reset countdowns, context window fill, daily/weekly token totals, session cost, and Anthropic API status with per-component health and incident details.
 
 **Config-driven.** New promotions go in `~/.claude/usage-windows.json`. No code changes needed.
 
 ### What it looks like
 
-**Claude Code status bar:**
+**Claude Code status bar (low usage — compact):**
 ```
 ⚡ 2x OFF-PEAK  ends in 7h 59m
-Opus 4.6 (1M context) │ █░░░░░░░ 12% │ sess 45.6k │ day 123k │ wk 890k │ ~$19.09
+Opus 4.6 (1M context) │ ctx 6% │ d 123k │ w 890k │ ~$4.51 │ 5h 9% │ 7d 1%
+```
+
+**Claude Code status bar (high usage — bars expand):**
+```
+⚡ 2x OFF-PEAK  ends in 7h 59m
+Opus 4.6 (1M context) │ ctx ███████░ 85% │ d 123k │ w 890k │ ~$19.09 │ 5h ███████░ 92% ↻23m │ 7d ████░░░░ 45%
 ```
 
 **Status check:**
@@ -23,6 +29,14 @@ $ claude-usage
 🟢 Off-peak (2x) (2x usage)
    Ends in:      7h 55m
    Promo: March 2026 2x Promo (ends in 12d 1h)
+```
+
+**API degraded (with incident detail):**
+```
+$ claude-usage api-status
+🟠 API: Partially Degraded Service (just now)
+  ⚡ Elevated error rates on Claude API [major]
+  ↳ Claude API: partial_outage
 ```
 
 **API degraded (5xx detected via direct probe):**
