@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Datelike, NaiveTime, Utc, Weekday};
+use chrono_tz::Tz;
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -843,6 +844,7 @@ fn should_defer(size: &str, s: &Status) -> bool {
 
 fn fmt_mins(m: u32) -> String {
     match m {
+        m if m >= 525_600 => "ongoing".into(),
         m if m >= 1440 => format!("{}d {}h", m / 1440, (m % 1440) / 60),
         m if m >= 60 => format!("{}h {:02}m", m / 60, m % 60),
         m => format!("{}m", m),
@@ -885,6 +887,26 @@ fn ctx_colored(pct: f64, text: &str) -> String {
     }
 }
 
+fn send_notification(title: &str, body: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!(
+            "display notification \"{}\" with title \"{}\"",
+            body.replace('\"', "\\\""),
+            title.replace('\"', "\\\""),
+        );
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .output();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("notify-send")
+            .args([title, body])
+            .output();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
@@ -915,8 +937,12 @@ enum Cmd {
     Json,
     /// List all configured windows
     Windows,
+    /// Show peak/off-peak schedule across timezones
+    Schedule,
     /// Block until a favorable window opens
     Wait,
+    /// Watch for status changes with desktop notifications
+    Watch,
     /// Check if a task should be deferred (small|medium|large|xl)
     Defer {
         #[arg(default_value = "large")]
@@ -925,7 +951,11 @@ enum Cmd {
     /// Check Anthropic API status (via status.anthropic.com)
     ApiStatus,
     /// Write windows.json to ~/.claude/ and register statusLine in settings.json
-    Init,
+    Init {
+        /// Overwrite existing usage-windows.json with the embedded default
+        #[arg(long)]
+        force: bool,
+    },
     /// MCP server over stdio (JSON-RPC 2.0)
     Mcp,
 }
@@ -933,8 +963,8 @@ enum Cmd {
 fn main() -> Result<()> {
     let cmd = Cli::parse().command.unwrap_or(Cmd::Status);
 
-    if let Cmd::Init = cmd {
-        return run_init();
+    if let Cmd::Init { force } = cmd {
+        return run_init(force);
     }
     if let Cmd::Mcp = cmd {
         return run_mcp();
@@ -942,6 +972,9 @@ fn main() -> Result<()> {
     if let Cmd::ApiStatus = cmd {
         run_api_status();
         return Ok(());
+    }
+    if let Cmd::Watch = cmd {
+        return run_watch();
     }
 
     let config = match load_config() {
@@ -965,9 +998,10 @@ fn main() -> Result<()> {
         Cmd::Tmux => run_tmux(&s),
         Cmd::Json => run_json(&s)?,
         Cmd::Windows => run_windows(&s),
+        Cmd::Schedule => run_schedule(&s),
         Cmd::Wait => run_wait(&s),
         Cmd::Defer { size } => run_defer(&s, &size),
-        Cmd::Init | Cmd::Mcp | Cmd::ApiStatus => unreachable!(),
+        Cmd::Init { .. } | Cmd::Mcp | Cmd::ApiStatus | Cmd::Watch => unreachable!(),
     }
     Ok(())
 }
@@ -1241,11 +1275,12 @@ fn run_status(s: &Status) {
                 fmt_mins_opt(w.mins_until_favorable)
             );
         }
-        println!(
-            "   Promo: {} (ends in {})",
-            w.window.label,
-            fmt_mins(w.promo_ends_in)
-        );
+        let duration = fmt_mins(w.promo_ends_in);
+        if duration == "ongoing" {
+            println!("   Promo: {} (ongoing)", w.window.label);
+        } else {
+            println!("   Promo: {} (ends in {})", w.window.label, duration);
+        }
     }
 }
 
@@ -1378,6 +1413,139 @@ fn run_windows(s: &Status) {
     }
 }
 
+fn get_local_tz() -> Option<Tz> {
+    iana_time_zone::get_timezone()
+        .ok()
+        .and_then(|s| s.parse::<Tz>().ok())
+}
+
+const SCHEDULE_ZONES: &[(&str, &str)] = &[
+    ("San Francisco", "America/Los_Angeles"),
+    ("New York", "America/New_York"),
+    ("London", "Europe/London"),
+    ("Paris", "Europe/Paris"),
+    ("Istanbul", "Europe/Istanbul"),
+    ("Dubai", "Asia/Dubai"),
+    ("Mumbai", "Asia/Kolkata"),
+    ("Tokyo", "Asia/Tokyo"),
+    ("Sydney", "Australia/Sydney"),
+];
+
+fn print_schedule_table(
+    utc_start: &str,
+    utc_end: &str,
+    days: &[String],
+    now: DateTime<Utc>,
+    local_tz: Option<Tz>,
+) {
+    let day_list = days.join(", ");
+    println!("  Peak: {} UTC {} – {}", day_list, utc_start, utc_end);
+    println!();
+
+    let today = now.date_naive();
+    let start_naive = chrono::NaiveDateTime::new(
+        today,
+        NaiveTime::parse_from_str(utc_start, "%H:%M").unwrap_or_default(),
+    );
+    let end_naive = chrono::NaiveDateTime::new(
+        today,
+        NaiveTime::parse_from_str(utc_end, "%H:%M").unwrap_or_default(),
+    );
+    let start_utc = start_naive.and_utc();
+    let end_utc = end_naive.and_utc();
+
+    // Build zone list: static zones + local zone if not already represented
+    let mut zones: Vec<(String, Tz)> = SCHEDULE_ZONES
+        .iter()
+        .filter_map(|(city, tz_name)| tz_name.parse::<Tz>().ok().map(|tz| (city.to_string(), tz)))
+        .collect();
+
+    if let Some(ltz) = local_tz {
+        if !zones.iter().any(|(_, tz)| *tz == ltz) {
+            zones.push((
+                ltz.name()
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or("Local")
+                    .replace('_', " "),
+                ltz,
+            ));
+        }
+    }
+
+    println!(
+        "    {:<16} {:>12}  {:>12}",
+        "City", "Peak start", "Peak end"
+    );
+    println!(
+        "    {:<16} {:>12}  {:>12}",
+        "────────────────", "──────────", "──────────"
+    );
+
+    for (city, tz) in &zones {
+        let local_start = start_utc.with_timezone(tz);
+        let local_end = end_utc.with_timezone(tz);
+        let marker = if local_tz.as_ref() == Some(tz) {
+            "→ "
+        } else {
+            "  "
+        };
+        println!(
+            "  {}{:<16} {:>12}  {:>12}",
+            marker,
+            city,
+            local_start.format("%l:%M %p").to_string().trim(),
+            local_end.format("%l:%M %p").to_string().trim(),
+        );
+    }
+}
+
+fn extract_recurring(schedule: &Schedule) -> Option<(&[String], &str, &str)> {
+    match schedule {
+        Schedule::Recurring {
+            days,
+            utc_start,
+            utc_end,
+        } => Some((days, utc_start, utc_end)),
+        Schedule::InverseRecurring { base } => match base.as_ref() {
+            Schedule::Recurring {
+                days,
+                utc_start,
+                utc_end,
+            } => Some((days, utc_start, utc_end)),
+            _ => None,
+        },
+        Schedule::Always => None,
+    }
+}
+
+fn run_schedule(s: &Status) {
+    if s.active_windows.is_empty() {
+        println!("No active windows. Run: claude-usage init");
+        return;
+    }
+
+    let local_tz = get_local_tz();
+
+    for w in &s.active_windows {
+        println!("{}", w.window.label);
+        let mut found_schedule = false;
+        for tier in &w.window.tiers {
+            if found_schedule {
+                continue;
+            }
+            if let Some((days, utc_start, utc_end)) = extract_recurring(&tier.schedule) {
+                found_schedule = true;
+                print_schedule_table(utc_start, utc_end, days, s.now, local_tz);
+            }
+        }
+        if !found_schedule {
+            println!("  Schedule: always active");
+        }
+        println!();
+    }
+}
+
 fn run_wait(s: &Status) {
     if s.favorable {
         eprintln!("✅ Already in favorable window.");
@@ -1390,6 +1558,79 @@ fn run_wait(s: &Status) {
             thread::sleep(Duration::from_secs(m as u64 * 60 + 30));
             eprintln!("✅ Favorable window active.");
         }
+    }
+}
+
+fn run_watch() -> Result<()> {
+    let mut last_favorable: Option<bool> = None;
+    let mut last_incident: Option<bool> = None;
+
+    loop {
+        let config = load_config();
+        let now = Utc::now();
+
+        match config {
+            Ok(config) => {
+                let s = evaluate(config, now);
+
+                let is_favorable = s.favorable && !s.active_windows.is_empty();
+                if let Some(was_favorable) = last_favorable {
+                    if is_favorable && !was_favorable {
+                        let msg = format!("⚡ {:.0}x multiplier now active", s.multiplier);
+                        println!("{} {}", now.format("%H:%M"), msg);
+                        send_notification("Claude Usage", &msg);
+                    } else if !is_favorable && was_favorable {
+                        println!("{} · Favorable window ended", now.format("%H:%M"));
+                    }
+                } else if s.active_windows.is_empty() {
+                    println!("{} No active promotions", now.format("%H:%M"));
+                } else if is_favorable {
+                    println!(
+                        "{} ⚡ {:.0}x OFF-PEAK  ends in {}",
+                        now.format("%H:%M"),
+                        s.multiplier,
+                        fmt_mins_opt(s.mins_until_change)
+                    );
+                } else {
+                    println!(
+                        "{} · {:.0}x PEAK  favorable in {}",
+                        now.format("%H:%M"),
+                        s.multiplier,
+                        fmt_mins_opt(s.mins_until_favorable)
+                    );
+                }
+                last_favorable = Some(is_favorable);
+
+                let api = get_api_status_fresh();
+                let has_incident = api.as_ref().is_some_and(|a| a.has_incident());
+                if let Some(had_incident) = last_incident {
+                    if has_incident && !had_incident {
+                        let desc = api
+                            .as_ref()
+                            .map(|a| a.description.as_str())
+                            .unwrap_or("Unknown");
+                        let msg = format!("⚠️ {}", desc);
+                        println!("{} {}", now.format("%H:%M"), msg);
+                        send_notification("Claude API", &msg);
+                    } else if !has_incident && had_incident {
+                        println!("{} ✅ API incident resolved", now.format("%H:%M"));
+                        send_notification(
+                            "Claude API",
+                            "Incident resolved — all systems operational",
+                        );
+                    }
+                }
+                last_incident = Some(has_incident);
+            }
+            Err(_) => {
+                if last_favorable.is_none() {
+                    println!("{} Watching... (no config found)", now.format("%H:%M"));
+                    last_favorable = Some(false);
+                }
+            }
+        }
+
+        thread::sleep(Duration::from_secs(60));
     }
 }
 
@@ -1562,19 +1803,23 @@ fn run_mcp() -> Result<()> {
     Ok(())
 }
 
-fn init_claude_dir(claude_dir: &PathBuf) -> Result<()> {
+fn init_claude_dir(claude_dir: &PathBuf, force: bool) -> Result<()> {
     fs::create_dir_all(claude_dir)?;
 
     // 1. Write windows.json
     let windows_dest = claude_dir.join("usage-windows.json");
-    if windows_dest.exists() {
+    if windows_dest.exists() && !force {
         println!(
-            "  Config exists: {} (not overwritten)",
+            "  Config exists: {} (not overwritten, use --force)",
             windows_dest.display()
         );
     } else {
+        if force && windows_dest.exists() {
+            println!("  Overwriting:   {}", windows_dest.display());
+        } else {
+            println!("  Initialized:   {}", windows_dest.display());
+        }
         fs::write(&windows_dest, DEFAULT_WINDOWS_JSON)?;
-        println!("  Initialized:   {}", windows_dest.display());
     }
 
     // 2. Register as statusLine in settings.json (non-destructive merge)
@@ -1636,12 +1881,12 @@ fn find_claude_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-fn run_init() -> Result<()> {
+fn run_init(force: bool) -> Result<()> {
     // If CLAUDE_CONFIG_DIR is set, only init that one
     if let Ok(dir) = std::env::var("CLAUDE_CONFIG_DIR") {
         let dir = PathBuf::from(dir);
         println!("{}:", dir.display());
-        init_claude_dir(&dir)?;
+        init_claude_dir(&dir, force)?;
         println!("\nRestart Claude Code to activate.");
         return Ok(());
     }
@@ -1656,7 +1901,7 @@ fn run_init() -> Result<()> {
 
     for dir in &dirs {
         println!("{}:", dir.display());
-        init_claude_dir(dir)?;
+        init_claude_dir(dir, force)?;
         println!();
     }
 

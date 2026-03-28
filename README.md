@@ -26,9 +26,23 @@ Opus 4.6 (1M context) │ ctx ███████░ 85% │ d 123k │ w 890k
 ```
 $ claude-usage
 🟢 API: All Systems Operational (just now)
-🟢 Off-peak (2x) (2x usage)
-   Ends in:      7h 55m
-   Promo: March 2026 2x Promo (ends in 12d 1h)
+🟢 Off-peak (standard) (1x usage)
+   Ends in:      1d 16h
+   Promo: Peak Hours Session Limit Adjustment (ongoing)
+```
+
+**Schedule across timezones:**
+```
+$ claude-usage schedule
+Peak Hours Session Limit Adjustment
+  Peak: mon, tue, wed, thu, fri UTC 13:00 – 19:00
+
+  City               Peak start      Peak end
+  ────────────────   ──────────    ──────────
+  San Francisco         6:00 AM      12:00 PM
+  New York              9:00 AM       3:00 PM
+  London                1:00 PM       7:00 PM
+  Tokyo                10:00 PM       4:00 AM
 ```
 
 **API degraded (with incident detail):**
@@ -77,6 +91,12 @@ claude-usage init
 
 Writes `usage-windows.json`, registers the statusline, and sets up the MCP server. If you have multiple `~/.claude*` directories, `init` finds and configures all of them automatically.
 
+To update an existing config with the latest embedded default:
+
+```sh
+claude-usage init --force
+```
+
 To target a specific instance:
 
 ```sh
@@ -87,6 +107,8 @@ CLAUDE_CONFIG_DIR=~/.claude-work claude-usage init
 
 ```sh
 claude-usage              # human-readable status (includes API health)
+claude-usage schedule     # peak/off-peak times across timezones
+claude-usage watch        # monitor status changes with desktop notifications
 claude-usage api-status   # check Anthropic API status (status page + direct probe)
 claude-usage label        # compact PS1/Starship token: ⚡2x
 claude-usage tmux         # tmux status bar segment

@@ -12,7 +12,7 @@
 
       "active_range": {
         "start": "2026-03-13T00:00:00Z",
-        "end":   "2026-03-28T06:59:59Z"
+        "end":   "2026-03-29T07:59:59Z"
       },
 
       "tiers": [
@@ -46,6 +46,51 @@
       ],
 
       "plans": ["free","pro","max","team"],
+      "surfaces": ["claude.ai","claude_code","cowork","excel","powerpoint"]
+    },
+
+    {
+      "id": "anthropic-peak-hours",
+      "label": "Peak Hours Session Limit Adjustment",
+      "description": "Session limits deplete faster during peak hours (13:00-19:00 UTC weekdays). Announced March 2026 as a permanent capacity management measure.",
+      "source": "https://www.theregister.com/2026/03/26/anthropic_tweaks_usage_limits/",
+
+      "active_range": {
+        "start": "2026-03-26T00:00:00Z",
+        "end":   "2099-12-31T23:59:59Z"
+      },
+
+      "tiers": [
+        {
+          "id": "off_peak",
+          "label": "Off-peak (standard)",
+          "multiplier": 1.0,
+          "favorable": true,
+          "schedule": {
+            "type": "inverse_recurring",
+            "base": {
+              "type": "recurring",
+              "days": ["mon","tue","wed","thu","fri"],
+              "utc_start": "13:00",
+              "utc_end":   "19:00"
+            }
+          }
+        },
+        {
+          "id": "peak",
+          "label": "Peak (reduced)",
+          "multiplier": 0.5,
+          "favorable": false,
+          "schedule": {
+            "type": "recurring",
+            "days": ["mon","tue","wed","thu","fri"],
+            "utc_start": "13:00",
+            "utc_end":   "19:00"
+          }
+        }
+      ],
+
+      "plans": ["free","pro","max"],
       "surfaces": ["claude.ai","claude_code","cowork","excel","powerpoint"]
     }
   ],
