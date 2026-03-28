@@ -115,6 +115,7 @@ struct CurrentUsage {
 #[derive(Debug, Deserialize)]
 struct CostInfo {
     total_cost_usd: Option<f64>,
+    total_duration_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -873,6 +874,26 @@ fn ctx_bar(pct: f64, width: usize) -> String {
     )
 }
 
+fn paced_bar(pct: f64, pace_pct: f64, width: usize) -> String {
+    let filled = ((pct / 100.0) * width as f64).round() as usize;
+    let pace_pos = ((pace_pct / 100.0) * width as f64).round() as usize;
+    let mut chars: Vec<&str> = Vec::with_capacity(width);
+    for i in 0..width {
+        if i == pace_pos && pace_pos < width {
+            if i < filled {
+                chars.push("▊");
+            } else {
+                chars.push("┊");
+            }
+        } else if i < filled {
+            chars.push("█");
+        } else {
+            chars.push("░");
+        }
+    }
+    chars.concat()
+}
+
 fn ansi(codes: &str, text: &str) -> String {
     format!("\x1b[{}m{}\x1b[0m", codes, text)
 }
@@ -1133,19 +1154,39 @@ fn run_statusline(s: &Status) {
         parts.push(format!("w {}", fmt_tokens(week_total)));
     }
 
-    if let Some(cost) = cc.cost.as_ref().and_then(|c| c.total_cost_usd) {
-        if cost > 0.001 {
-            parts.push(ansi("90", &format!("~${:.2}", cost)));
+    if let Some(ref cost_info) = cc.cost {
+        if let Some(cost) = cost_info.total_cost_usd {
+            if cost > 0.001 {
+                let burn = cost_info
+                    .total_duration_ms
+                    .filter(|&ms| ms > 60_000)
+                    .map(|ms| cost / (ms as f64 / 3_600_000.0));
+                if let Some(rate) = burn {
+                    parts.push(ansi("90", &format!("~${:.2} (${:.2}/h)", cost, rate)));
+                } else {
+                    parts.push(ansi("90", &format!("~${:.2}", cost)));
+                }
+            }
         }
     }
 
     if let Some(ref rl) = cc.rate_limits {
         let now_ts = now.timestamp();
-        for (label, window) in [("5h", &rl.five_hour), ("7d", &rl.seven_day)] {
+        let window_secs: &[(&str, &Option<RateLimitWindow>, i64)] =
+            &[("5h", &rl.five_hour, 18000), ("7d", &rl.seven_day, 604800)];
+        for &(label, window, duration) in window_secs {
             if let Some(w) = window {
                 if let Some(pct) = w.used_percentage {
                     if pct > 50.0 {
-                        let bar = ctx_bar(pct, 8);
+                        let pace_pct = w.resets_at.filter(|&ts| ts > now_ts).map(|ts| {
+                            let elapsed = duration - (ts - now_ts);
+                            (elapsed as f64 / duration as f64 * 100.0).clamp(0.0, 100.0)
+                        });
+                        let bar = if let Some(pp) = pace_pct {
+                            paced_bar(pct, pp, 8)
+                        } else {
+                            ctx_bar(pct, 8)
+                        };
                         let reset_suffix = if pct > 80.0 {
                             w.resets_at
                                 .filter(|&ts| ts > now_ts)

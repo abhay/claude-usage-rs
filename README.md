@@ -13,14 +13,16 @@ Shows promotional multipliers (2x off-peak, etc.), 5-hour and 7-day rate limit u
 **Claude Code status bar (low usage — compact):**
 ```
 ⚡ 2x OFF-PEAK  ends in 7h 59m
-Opus 4.6 (1M context) │ ctx 6% │ d 123k │ w 890k │ ~$4.51 │ 5h 9% │ 7d 1%
+Opus 4.6 (1M context) │ ctx 6% │ d 123k │ w 890k │ ~$4.51 ($6.00/h) │ 5h 9% │ 7d 1%
 ```
 
-**Claude Code status bar (high usage — bars expand):**
+**Claude Code status bar (high usage — bars with pacing markers):**
 ```
 ⚡ 2x OFF-PEAK  ends in 7h 59m
-Opus 4.6 (1M context) │ ctx ███████░ 85% │ d 123k │ w 890k │ ~$19.09 │ 5h ███████░ 92% ↻23m │ 7d ████░░░░ 45%
+Opus 4.6 (1M context) │ ctx ███████░ 85% │ d 123k │ w 890k │ ~$19.09 ($8.33/h) │ 5h ██▊████░ 92% ↻23m │ 7d ████░┊░░ 45%
 ```
+
+The `▊` and `┊` markers show where even-paced usage would be. If the fill is past the marker, you're burning faster than average.
 
 **Status check:**
 ```
