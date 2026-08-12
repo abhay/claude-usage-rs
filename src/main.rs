@@ -1273,6 +1273,20 @@ fn main() -> Result<()> {
 //        Line 2:              sonnet-4-5 │ ████░░░░ 23% │ sess 12.3k │ day 45.6k │ wk 234k │ $0.024
 // ---------------------------------------------------------------------------
 
+/// A window earns a prominent badge only when it's an actual bonus — favorable
+/// AND better than the 1x baseline. The permanent peak/off-peak window (1x
+/// off-peak, 0.5x peak) is ambient state, not a promotion, and real bonus
+/// promos are rare — so the badge stays out of the way until one is live.
+fn is_bonus(s: &Status) -> bool {
+    s.favorable && s.multiplier > 1.0
+}
+
+/// Format a usage multiplier honestly: 2.0 → "2x", 0.5 → "0.5x". Plain `{:.0}`
+/// rounds 0.5 to a misleading "0x".
+fn fmt_mult(m: f64) -> String {
+    format!("{m}x")
+}
+
 fn run_statusline(s: &Status) {
     let now = s.now;
     let mut raw = String::new();
@@ -1330,30 +1344,15 @@ fn run_statusline(s: &Status) {
         }
     };
 
-    if !s.active_windows.is_empty() {
-        if s.favorable {
-            println!(
-                "{} {}  ends in {}{}",
-                ansi("32;1", &format!("⚡{:.0}x", s.multiplier)),
-                ansi("32;1", "OFF-PEAK"),
-                fmt_mins_opt(s.mins_until_change),
-                suffix
-            );
-        } else {
-            println!(
-                "{} {}  {:.0}x in {}{}",
-                ansi("33;1", &format!("·{:.0}x", s.multiplier)),
-                ansi("33;1", "PEAK"),
-                s.active_windows
-                    .iter()
-                    .filter(|w| w.favorable)
-                    .map(|w| w.multiplier)
-                    .next()
-                    .unwrap_or(2.0),
-                fmt_mins_opt(s.mins_until_favorable),
-                suffix
-            );
-        }
+    if is_bonus(s) {
+        // A real favorable bonus (>1x) is rare — give it the prominent line.
+        println!(
+            "{} {}  ends in {}{}",
+            ansi("32;1", &format!("⚡{}", fmt_mult(s.multiplier))),
+            ansi("32;1", "OFF-PEAK"),
+            fmt_mins_opt(s.mins_until_change),
+            suffix
+        );
     } else if !suffix.is_empty() {
         println!("{}", suffix);
     }
@@ -1449,6 +1448,26 @@ fn run_statusline(s: &Status) {
         }
     }
 
+    // Reduced-rate (peak) hours get a quiet dim chip on line 2 rather than a
+    // headline; normal 1x off-peak shows nothing at all.
+    if !s.active_windows.is_empty() && !s.favorable {
+        let next_bonus = s
+            .active_windows
+            .iter()
+            .filter(|w| w.favorable)
+            .map(|w| w.multiplier)
+            .find(|&m| m > 1.0);
+        let chip = match next_bonus {
+            Some(m) => format!(
+                "peak · {} in {}",
+                fmt_mult(m),
+                fmt_mins_opt(s.mins_until_favorable)
+            ),
+            None => format!("peak · off-peak {}", fmt_mins_opt(s.mins_until_favorable)),
+        };
+        parts.push(ansi("90", &chip));
+    }
+
     if !parts.is_empty() {
         println!("{}", parts.join(" │ "));
     }
@@ -1540,16 +1559,16 @@ fn run_status(s: &Status) {
             .unwrap_or("unknown");
         if w.favorable {
             println!(
-                "🟢 {} ({:.0}x usage)\n   Ends in:      {}",
+                "🟢 {} ({} usage)\n   Ends in:      {}",
                 t,
-                w.multiplier,
+                fmt_mult(w.multiplier),
                 fmt_mins_opt(w.mins_until_change)
             );
         } else {
             println!(
-                "🔴 {} ({:.0}x usage)\n   Favorable in: {}",
+                "🔴 {} ({} usage)\n   Favorable in: {}",
                 t,
-                w.multiplier,
+                fmt_mult(w.multiplier),
                 fmt_mins_opt(w.mins_until_favorable)
             );
         }
@@ -1563,32 +1582,20 @@ fn run_status(s: &Status) {
 }
 
 fn run_label(s: &Status) {
-    if s.active_windows.is_empty() {
+    if !is_bonus(s) {
         return;
     }
-    print!(
-        "{}{:.0}x",
-        if s.favorable { "⚡" } else { "·" },
-        s.multiplier
-    );
+    print!("⚡{}", fmt_mult(s.multiplier));
 }
 
 fn run_tmux(s: &Status) {
-    if s.active_windows.is_empty() {
+    if !is_bonus(s) {
         return;
     }
-    if s.favorable {
-        print!(
-            "#[fg=colour46,bold]⚡{:.0}x#[fg=colour244] Claude#[default]",
-            s.multiplier
-        );
-    } else {
-        print!(
-            "#[fg=colour208,bold]·{:.0}x#[fg=colour244] ({})#[default]",
-            s.multiplier,
-            fmt_mins_opt(s.mins_until_favorable)
-        );
-    }
+    print!(
+        "#[fg=colour46,bold]⚡{}#[fg=colour244] Claude#[default]",
+        fmt_mult(s.multiplier)
+    );
 }
 
 fn run_json(s: &Status) -> Result<()> {
