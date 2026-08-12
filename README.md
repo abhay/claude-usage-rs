@@ -10,19 +10,23 @@ Shows promotional multipliers (2x off-peak, etc.), 5-hour and 7-day rate limit u
 
 ### What it looks like
 
-**Claude Code status bar (low usage — compact):**
+Most of the time there's no promo, so the status bar is just your usage — no window badge at all:
 ```
-⚡ 2x OFF-PEAK  ends in 7h 59m
 Opus 4.6 (1M context) │ ctx 6% │ d 123k │ w 890k │ ~$4.51 ($6.00/h) │ 5h 9% │ 7d 1%
 ```
 
-**Claude Code status bar (high usage — bars with pacing markers):**
+**High usage — bars with pacing markers.** During peak hours a quiet marker rides along at the end:
 ```
-⚡ 2x OFF-PEAK  ends in 7h 59m
-Opus 4.6 (1M context) │ ctx ███████░ 85% │ d 123k │ w 890k │ ~$19.09 ($8.33/h) │ 5h ██▊████░ 92% ↻23m │ 7d ████░┊░░ 45%
+Opus 4.6 (1M context) │ ctx ███████░ 85% │ d 123k │ w 890k │ ~$19.09 ($8.33/h) │ 5h ██▊████░ 92% ↻23m │ 7d ████░┊░░ 45% │ peak · off-peak 1h 46m
 ```
 
 The `▊` and `┊` markers show where even-paced usage would be. If the fill is past the marker, you're burning faster than average.
+
+**When a real promotion is live** (2x off-peak, etc.) — rare, so it earns the top line:
+```
+⚡2x OFF-PEAK  ends in 7h 59m
+Opus 4.6 (1M context) │ ctx 6% │ d 123k │ w 890k │ ~$4.51 ($6.00/h) │ 5h 9% │ 7d 1%
+```
 
 **Status check:**
 ```
@@ -112,7 +116,7 @@ claude-usage              # human-readable status (includes API health)
 claude-usage schedule     # peak/off-peak times across timezones
 claude-usage watch        # monitor status changes with desktop notifications
 claude-usage api-status   # check Anthropic API status (status page + direct probe)
-claude-usage label        # compact PS1/Starship token: ⚡2x
+claude-usage label        # compact PS1/Starship token — blank unless a promo is live (⚡2x)
 claude-usage tmux         # tmux status bar segment
 claude-usage statusline   # Claude Code status bar (reads JSON from stdin)
 claude-usage json         # machine-readable JSON
@@ -130,6 +134,8 @@ claude-usage menubar --install      # install the native macOS menu bar app
 `claude-usage loops --serve` starts a local dashboard (127.0.0.1:4711) that
 visualizes every agent loop on the machine:
 
+![loop dashboard](assets/dashboard-overview.png)
+
 - **Ralph loops** — discovered by scanning for `.ralph/` dirs (cwd, `~/Repos`,
   `--root <dir>`, or `CLAUDE_USAGE_LOOP_ROOTS=a:b`) plus any live `ralph run`
   process. Each card shows a segmented stage meter — hover a segment for that
@@ -146,12 +152,19 @@ awake`. The page auto-refreshes every few seconds; transcript scans are
 incremental (byte offsets), so polling stays cheap even with multi-GB session
 transcripts.
 
+**Click any card to drill in** — the full stage checklist, per-iteration cost and
+duration, run history with failure reasons, and the live event feed:
+
+![dashboard detail](assets/dashboard-detail.png)
+
 ## Menu bar (macOS)
 
 The native menu app turns the same local state into a compact command center.
 Its translucent system menu has provider-style **Codex** and **Claude** tabs,
 plus a **Work** tab for Ralph loops and live Claude sessions. Keep-awake, the
 loop dashboard, refresh, and both provider status pages stay one click away.
+
+![menu bar — Claude tab](assets/menubar.png)
 
 ```sh
 claude-usage menubar --install
