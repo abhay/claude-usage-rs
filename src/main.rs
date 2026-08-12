@@ -1832,22 +1832,46 @@ fn run_schedule(s: &Status) {
 }
 
 fn run_wait(s: &Status) {
-    if s.favorable {
-        eprintln!("✅ Already in favorable window.");
+    if is_bonus(s) {
+        eprintln!("✅ Already in a bonus window ({}).", fmt_mult(s.multiplier));
         return;
     }
-    match s.mins_until_favorable {
-        None => eprintln!("ℹ️  No favorable window scheduled."),
-        Some(m) => {
-            eprintln!("⏳ Waiting {} for favorable window...", fmt_mins(m));
-            thread::sleep(Duration::from_secs(m as u64 * 60 + 30));
-            eprintln!("✅ Favorable window active.");
+    // Only real promos (>1x) are worth waiting for — the permanent 1x off-peak
+    // window is not. Bail if no bonus is active or upcoming.
+    let bonus_upcoming = s
+        .active_windows
+        .iter()
+        .chain(
+            s.inactive_windows
+                .iter()
+                .filter(|w| w.reason.as_deref() == Some("not_started")),
+        )
+        .any(|w| {
+            w.window
+                .tiers
+                .iter()
+                .any(|t| t.favorable && t.multiplier > 1.0)
+        });
+    if !bonus_upcoming {
+        eprintln!("ℹ️  No bonus window scheduled.");
+        return;
+    }
+    // "Mins until favorable" now tracks the ambient off-peak cycle, not the
+    // bonus, so poll rather than sleep a computed duration.
+    eprintln!("⏳ Waiting for a bonus window to open...");
+    loop {
+        thread::sleep(Duration::from_secs(60));
+        let Ok(cfg) = load_config() else { continue };
+        let s2 = evaluate(cfg, Utc::now());
+        if is_bonus(&s2) {
+            eprintln!("✅ Bonus window active ({}).", fmt_mult(s2.multiplier));
+            return;
         }
     }
 }
 
 fn run_watch() -> Result<()> {
-    let mut last_favorable: Option<bool> = None;
+    let mut last_bonus: Option<bool> = None;
     let mut last_incident: Option<bool> = None;
 
     loop {
@@ -1858,33 +1882,26 @@ fn run_watch() -> Result<()> {
             Ok(config) => {
                 let s = evaluate(config, now);
 
-                let is_favorable = s.favorable && !s.active_windows.is_empty();
-                if let Some(was_favorable) = last_favorable {
-                    if is_favorable && !was_favorable {
-                        let msg = format!("⚡ {:.0}x multiplier now active", s.multiplier);
+                let bonus_now = is_bonus(&s);
+                if let Some(was_bonus) = last_bonus {
+                    if bonus_now && !was_bonus {
+                        let msg = format!("⚡ {} multiplier now active", fmt_mult(s.multiplier));
                         println!("{} {}", now.format("%H:%M"), msg);
                         send_notification("Claude Usage", &msg);
-                    } else if !is_favorable && was_favorable {
-                        println!("{} · Favorable window ended", now.format("%H:%M"));
+                    } else if !bonus_now && was_bonus {
+                        println!("{} · Bonus window ended", now.format("%H:%M"));
                     }
-                } else if s.active_windows.is_empty() {
-                    println!("{} No active promotions", now.format("%H:%M"));
-                } else if is_favorable {
+                } else if bonus_now {
                     println!(
-                        "{} ⚡ {:.0}x OFF-PEAK  ends in {}",
+                        "{} ⚡ {} OFF-PEAK  ends in {}",
                         now.format("%H:%M"),
-                        s.multiplier,
+                        fmt_mult(s.multiplier),
                         fmt_mins_opt(s.mins_until_change)
                     );
                 } else {
-                    println!(
-                        "{} · {:.0}x PEAK  favorable in {}",
-                        now.format("%H:%M"),
-                        s.multiplier,
-                        fmt_mins_opt(s.mins_until_favorable)
-                    );
+                    println!("{} · No bonus active (standard rates)", now.format("%H:%M"));
                 }
-                last_favorable = Some(is_favorable);
+                last_bonus = Some(bonus_now);
 
                 let api = get_api_status_fresh();
                 let has_incident = api.as_ref().is_some_and(|a| a.has_incident());
@@ -1908,9 +1925,9 @@ fn run_watch() -> Result<()> {
                 last_incident = Some(has_incident);
             }
             Err(_) => {
-                if last_favorable.is_none() {
+                if last_bonus.is_none() {
                     println!("{} Watching... (no config found)", now.format("%H:%M"));
-                    last_favorable = Some(false);
+                    last_bonus = Some(false);
                 }
             }
         }
