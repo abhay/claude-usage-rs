@@ -1,6 +1,6 @@
 [package]
 name = "claude-usage"
-version = "0.1.6"
+version = "0.2.0"
 edition = "2021"
 description = "CLI for tracking Claude usage windows, rate limits, and API health: status bar, token tracking, defer logic"
 license = "MIT"

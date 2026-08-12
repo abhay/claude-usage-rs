@@ -1,3 +1,8 @@
+mod awake;
+mod loops;
+mod menubar;
+mod serve;
+
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Datelike, NaiveTime, Utc, Weekday};
 use chrono_tz::Tz;
@@ -212,6 +217,108 @@ fn update_usage(state: &mut UsageState, session_id: &str, new_total: u64, now: D
     state
         .weekly
         .retain(|k, _| k.as_str() >= cutoff_week_key.as_str());
+}
+
+// ---------------------------------------------------------------------------
+// Statusline cache: the last rate-limit/cost snapshot Claude Code piped to the
+// statusline, persisted so the menu bar can show usage between turns
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
+struct SessionCost {
+    cost_usd: f64,
+    duration_ms: u64,
+    updated: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
+struct StatuslineCache {
+    updated: String,
+    model: Option<String>,
+    context_pct: Option<f64>,
+    five_hour_pct: Option<f64>,
+    five_hour_resets_at: Option<i64>,
+    seven_day_pct: Option<f64>,
+    seven_day_resets_at: Option<i64>,
+    // per-session — concurrent sessions each tick the statusline, and a new
+    // session's $0 must not clobber another's running total
+    #[serde(default)]
+    sessions: HashMap<String, SessionCost>,
+}
+
+fn statusline_cache_path() -> Option<PathBuf> {
+    claude_config_dir().map(|d| d.join("statusline-cache.json"))
+}
+
+fn load_statusline_cache() -> Option<StatuslineCache> {
+    let data = fs::read_to_string(statusline_cache_path()?).ok()?;
+    serde_json::from_str(&data).ok()
+}
+
+/// Merge this turn's snapshot over the stored one — a session that lacks a
+/// field (e.g. no rate_limits yet) must not wipe fresher data from another.
+fn save_statusline_cache(cc: &StatuslineInput, now: DateTime<Utc>) {
+    let Some(path) = statusline_cache_path() else {
+        return;
+    };
+    let mut c = load_statusline_cache().unwrap_or_default();
+    c.updated = now.to_rfc3339();
+    if let Some(m) = &cc.model {
+        c.model = Some(m.display_name.clone());
+    }
+    if let Some(pct) = cc.context_window.as_ref().and_then(|w| w.used_percentage) {
+        c.context_pct = Some(pct);
+    }
+    if let (Some(sid), Some(cost)) = (
+        cc.session_id.as_deref(),
+        cc.cost.as_ref().and_then(|x| x.total_cost_usd),
+    ) {
+        c.sessions.insert(
+            sid.to_string(),
+            SessionCost {
+                cost_usd: cost,
+                duration_ms: cc
+                    .cost
+                    .as_ref()
+                    .and_then(|x| x.total_duration_ms)
+                    .unwrap_or(0),
+                updated: now.to_rfc3339(),
+            },
+        );
+    }
+    let cutoff = now - chrono::Duration::hours(24);
+    c.sessions.retain(|_, s| {
+        s.updated
+            .parse::<DateTime<Utc>>()
+            .map(|t| t > cutoff)
+            .unwrap_or(false)
+    });
+    if let Some(rl) = &cc.rate_limits {
+        if let Some(w) = &rl.five_hour {
+            if w.used_percentage.is_some() {
+                c.five_hour_pct = w.used_percentage;
+                c.five_hour_resets_at = w.resets_at;
+            }
+        }
+        if let Some(w) = &rl.seven_day {
+            if w.used_percentage.is_some() {
+                c.seven_day_pct = w.used_percentage;
+                c.seven_day_resets_at = w.resets_at;
+            }
+        }
+    }
+    if let Ok(json) = serde_json::to_string_pretty(&c) {
+        // Write to a per-process temp file then atomically rename: concurrent
+        // sessions each tick the statusline, and a reader that caught a
+        // half-written file would parse it as empty and wipe every other
+        // session's totals on its next write.
+        let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+        if fs::write(&tmp, json).is_ok() {
+            let _ = fs::rename(&tmp, &path);
+        } else {
+            let _ = fs::remove_file(&tmp);
+        }
+    }
 }
 
 fn claude_config_dir() -> Option<PathBuf> {
@@ -979,6 +1086,68 @@ enum Cmd {
     },
     /// MCP server over stdio (JSON-RPC 2.0)
     Mcp,
+    /// List ralph and /goal loops, or serve the loop dashboard (--serve)
+    Loops {
+        #[command(subcommand)]
+        action: Option<LoopsCmd>,
+        /// Machine-readable JSON
+        #[arg(long)]
+        json: bool,
+        /// Serve the web dashboard (hover/click-through loop visualizer)
+        #[arg(long)]
+        serve: bool,
+        /// Dashboard port
+        #[arg(long, default_value_t = 4711)]
+        port: u16,
+        /// Open the dashboard in a browser
+        #[arg(long)]
+        open: bool,
+        /// Extra root directory to scan for .ralph loops (repeatable)
+        #[arg(long)]
+        root: Vec<PathBuf>,
+    },
+    /// Keep the machine awake, Amphetamine-style (status | on | off)
+    Awake {
+        #[command(subcommand)]
+        action: Option<AwakeCmd>,
+    },
+    /// macOS menu bar UI (native app, JSON bridge, or SwiftBar compatibility)
+    Menubar {
+        /// Build, install, and launch the native menu bar app
+        #[arg(long, conflicts_with_all = ["install_swiftbar", "json"])]
+        install: bool,
+        /// Install the legacy SwiftBar plugin instead of the native app
+        #[arg(long = "install-swiftbar", conflicts_with_all = ["install", "json"])]
+        install_swiftbar: bool,
+        /// Print the compact snapshot consumed by the native menu bar app
+        #[arg(long, conflicts_with_all = ["install", "install_swiftbar"])]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum LoopsCmd {
+    /// Hide a stopped loop from the menu bar (it reappears if it runs again)
+    Dismiss { id: String },
+    /// Quit a registered Claude Code session by pid (SIGTERM, verified first)
+    Quit { pid: u32 },
+}
+
+#[derive(Subcommand)]
+enum AwakeCmd {
+    /// Start keeping the machine awake
+    On {
+        /// Stop after a duration (e.g. 8h, 90m, 2h30m)
+        #[arg(long = "for", value_name = "DURATION")]
+        duration: Option<String>,
+        /// Also survive a closed lid on battery (sudo pmset -a disablesleep 1)
+        #[arg(long)]
+        lid: bool,
+    },
+    /// Stop keeping the machine awake
+    Off,
+    /// Show keep-awake status (default)
+    Status,
 }
 
 fn main() -> Result<()> {
@@ -996,6 +1165,66 @@ fn main() -> Result<()> {
     }
     if let Cmd::Watch = cmd {
         return run_watch();
+    }
+    if let Cmd::Loops {
+        action,
+        json,
+        serve,
+        port,
+        open,
+        root,
+    } = cmd
+    {
+        if let Some(action) = action {
+            return match action {
+                LoopsCmd::Dismiss { id } => loops::dismiss(&id),
+                LoopsCmd::Quit { pid } => loops::quit_session(pid),
+            };
+        }
+        if serve {
+            return serve::serve(port, root, open);
+        }
+        let mut cache = loops::ScanCache::default();
+        let found = loops::collect_loops(&root, &mut cache);
+        if json {
+            println!("{}", serde_json::to_string_pretty(&found)?);
+        } else {
+            loops::print_loops(&found);
+        }
+        return Ok(());
+    }
+    if let Cmd::Menubar {
+        install,
+        install_swiftbar,
+        json,
+    } = cmd
+    {
+        if install {
+            return menubar::install_native_app();
+        }
+        if install_swiftbar {
+            return menubar::install_swiftbar_plugin();
+        }
+        if json {
+            return menubar::run_native_json();
+        }
+        menubar::run_menubar();
+        return Ok(());
+    }
+    if let Cmd::Awake { action } = cmd {
+        match action {
+            Some(AwakeCmd::On { duration, lid }) => {
+                let secs = duration.as_deref().map(awake::parse_duration).transpose()?;
+                awake::turn_on(secs, lid)?;
+                awake::print_status();
+            }
+            Some(AwakeCmd::Off) => match awake::turn_off()? {
+                Some(warning) => println!("⚠️  {}", warning),
+                None => println!("💤 Keep-awake stopped."),
+            },
+            Some(AwakeCmd::Status) | None => awake::print_status(),
+        }
+        return Ok(());
     }
 
     let config = match load_config() {
@@ -1022,7 +1251,13 @@ fn main() -> Result<()> {
         Cmd::Schedule => run_schedule(&s),
         Cmd::Wait => run_wait(&s),
         Cmd::Defer { size } => run_defer(&s, &size),
-        Cmd::Init { .. } | Cmd::Mcp | Cmd::ApiStatus | Cmd::Watch => unreachable!(),
+        Cmd::Init { .. }
+        | Cmd::Mcp
+        | Cmd::ApiStatus
+        | Cmd::Watch
+        | Cmd::Loops { .. }
+        | Cmd::Awake { .. }
+        | Cmd::Menubar { .. } => unreachable!(),
     }
     Ok(())
 }
@@ -1055,6 +1290,8 @@ fn run_statusline(s: &Status) {
                 + u.cache_read_input_tokens.unwrap_or(0)
         })
         .unwrap_or(0);
+
+    save_statusline_cache(&cc, now);
 
     // Update persistent state and retrieve today/week totals
     let mut state = load_usage_state();

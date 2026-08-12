@@ -2,7 +2,7 @@
 
 ![claude-usage statusline](assets/statusline.png)
 
-Tracks Claude usage windows, rate limits, and API health. Bolts onto your shell prompt, tmux, and Claude Code status bar.
+Tracks Claude usage windows, rate limits, and API health. Bolts onto your shell prompt, tmux, and Claude Code status bar. Also visualizes long-running agent loops (ralph orchestrator + Claude Code `/goal` sessions) and keeps your machine awake while they run.
 
 Shows promotional multipliers (2x off-peak, etc.), 5-hour and 7-day rate limit usage with reset countdowns, context window fill, daily/weekly token totals, session cost, and Anthropic API status with per-component health and incident details.
 
@@ -119,7 +119,99 @@ claude-usage json         # machine-readable JSON
 claude-usage windows      # list all configured windows
 claude-usage defer large  # should I defer this task? (small|medium|large|xl)
 claude-usage wait         # block until a favorable window opens
+claude-usage loops        # list ralph + /goal loops (--json for machines)
+claude-usage loops --serve --open   # web dashboard for loops (port 4711)
+claude-usage awake on     # keep the machine awake (Amphetamine-style)
+claude-usage menubar --install      # install the native macOS menu bar app
 ```
+
+## Loop dashboard
+
+`claude-usage loops --serve` starts a local dashboard (127.0.0.1:4711) that
+visualizes every agent loop on the machine:
+
+- **Ralph loops** — discovered by scanning for `.ralph/` dirs (cwd, `~/Repos`,
+  `--root <dir>`, or `CLAUDE_USAGE_LOOP_ROOTS=a:b`) plus any live `ralph run`
+  process. Each card shows a segmented stage meter — hover a segment for that
+  stage's title, status, and task tally; click the card to drill into the full
+  stage list with its task checklist, per-iteration duration/cost, the live
+  event feed, and run history with failure reasons.
+- **Claude Code sessions** — live sessions from `~/.claude/sessions`, with the
+  active `/goal` (parsed from the session transcript) surfaced on the card and
+  recent messages in the click-through. Sessions that are just a ralph loop's
+  backend are folded into the loop instead of listed twice.
+
+The header has a keep-awake toggle wired to the same state as `claude-usage
+awake`. The page auto-refreshes every few seconds; transcript scans are
+incremental (byte offsets), so polling stays cheap even with multi-GB session
+transcripts.
+
+## Menu bar (macOS)
+
+The native menu app turns the same local state into a compact command center.
+Its translucent system menu has provider-style **Codex** and **Claude** tabs,
+plus a **Work** tab for Ralph loops and live Claude sessions. Keep-awake, the
+loop dashboard, refresh, and both provider status pages stay one click away.
+
+```sh
+claude-usage menubar --install
+```
+
+The installer compiles a small AppKit/SwiftUI companion into
+`~/Applications/Claude Usage.app` and launches it. macOS 14+ and Xcode Command
+Line Tools are required for this source install. The companion contains no
+account or parsing logic: it refreshes the local `claude-usage menubar --json`
+snapshot every minute, leaving the Rust CLI as the source of truth.
+
+Claude usage bars come from the snapshot the statusline persists on every
+Claude Code turn (`statusline-cache.json`), so the statusline must be
+registered for 5h/7d limits, context, and session cost to appear. Codex usage
+comes directly from the signed-in Codex CLI through its local read-only
+app-server API; GUI launches also discover Codex installations managed by nvm.
+
+The native views stay tidy on their own: running loops always show, recent
+stopped loops remain for 3 days, and older activity collapses into a dashboard
+count. Sessions surface their live goal or latest message without turning the
+menu into a transcript viewer.
+
+The Codex and Claude provider marks are adapted from
+[CodexBar](https://github.com/steipete/CodexBar) under its MIT license.
+
+Prefer SwiftBar/xbar? The original plaintext integration remains available:
+
+```sh
+brew install --cask swiftbar
+claude-usage menubar --install-swiftbar
+open -a SwiftBar
+```
+
+The SwiftBar fallback preserves the original per-stage submenus, stopped-loop
+**Dismiss** action (`claude-usage loops dismiss <name>`), and verified session
+**Quit** action (`claude-usage loops quit <pid>`). Quitting sends SIGTERM only
+to registered Claude processes; the transcript survives and `claude --resume`
+restores the conversation. Dismissed loops reappear automatically if they run
+again.
+
+That plugin refreshes every 15s (`claude-usage-loops.15s.sh` — rename to
+change). `claude-usage menubar` still prints one SwiftBar refresh, so it also
+works with xbar or anything that speaks the same format.
+
+## Keep awake (Amphetamine equivalent)
+
+```sh
+claude-usage awake on            # caffeinate (macOS) / systemd-inhibit (Linux)
+claude-usage awake on --for 8h   # auto-expire
+claude-usage awake on --lid      # ALSO survive a closed lid on battery
+claude-usage awake off
+claude-usage awake               # status
+```
+
+Plain `awake on` prevents idle/display/system sleep, which covers a plugged-in
+Mac even with the lid closed. On battery, macOS force-sleeps on lid close no
+matter what assertions are held — `--lid` works around that with
+`sudo pmset -a disablesleep 1` (prompts for your password, reverted by
+`awake off`). While lid mode is on the machine will not sleep at all, so mind
+the heat if it goes in a bag.
 
 ## Shell integration
 

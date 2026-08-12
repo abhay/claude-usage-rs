@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>claude-usage · loops</title>
+<style>
+  :root {
+    color-scheme: light;
+    --page:           #f4f4f2;
+    --surface:        #fcfcfb;
+    --surface-2:      #f0efec;
+    --border:         #e3e2de;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted:     #8a8983;
+    --accent:         #2a78d6;   /* series-1 blue: stage fill, links */
+    --accent-soft:    #cde2fb;
+    --good:           #0ca30c;
+    --warning:        #fab219;
+    --serious:        #ec835a;
+    --critical:       #d03b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --page:           #131312;
+      --surface:        #1a1a19;
+      --surface-2:      #232322;
+      --border:         #32322f;
+      --text-primary:   #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted:     #85847c;
+      --accent:         #3987e5;
+      --accent-soft:    #1c3a5e;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--page); color: var(--text-primary);
+    font: 14px/1.5 -apple-system, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 12px;
+    padding: 14px 20px; border-bottom: 1px solid var(--border);
+    background: var(--surface); position: sticky; top: 0; z-index: 5;
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 650; }
+  header h1 span { color: var(--text-muted); font-weight: 400; }
+  .spacer { flex: 1; }
+  .pulse {
+    width: 8px; height: 8px; border-radius: 50%; background: var(--good);
+    animation: pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
+  #refreshed { color: var(--text-muted); font-size: 12px; }
+
+  /* Keep-awake toggle */
+  #awake {
+    display: flex; align-items: center; gap: 8px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--surface-2);
+    color: var(--text-primary); border-radius: 999px; padding: 5px 14px;
+    font: inherit; font-size: 13px;
+  }
+  #awake.on { border-color: var(--good); }
+  #awake .knob {
+    width: 26px; height: 15px; border-radius: 999px; background: var(--border);
+    position: relative; transition: background .15s;
+  }
+  #awake.on .knob { background: var(--good); }
+  #awake .knob::after {
+    content: ""; position: absolute; top: 2px; left: 2px;
+    width: 11px; height: 11px; border-radius: 50%; background: var(--surface);
+    transition: left .15s;
+  }
+  #awake.on .knob::after { left: 13px; }
+  #awake .lid { color: var(--serious); font-size: 12px; }
+
+  main { max-width: 1080px; margin: 0 auto; padding: 20px; }
+  h2 {
+    font-size: 12px; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--text-muted); margin: 22px 0 10px; font-weight: 600;
+  }
+  .empty { color: var(--text-muted); padding: 8px 2px; }
+
+  /* Cards */
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px 16px; margin-bottom: 10px;
+    cursor: pointer; transition: border-color .12s;
+  }
+  .card:hover { border-color: var(--accent); }
+  .card-top { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .card-top .name { font-weight: 650; font-size: 15px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 11.5px; font-weight: 600; border-radius: 999px; padding: 1px 9px;
+    border: 1px solid var(--border); color: var(--text-secondary);
+  }
+  .chip.running  { color: var(--good); border-color: var(--good); }
+  .chip.failed   { color: var(--critical); border-color: var(--critical); }
+  .chip.completed{ color: var(--good); border-color: var(--border); }
+  .chip.busy     { color: var(--good); border-color: var(--good); }
+  .kind {
+    font-size: 10.5px; letter-spacing: .06em; font-weight: 700;
+    color: var(--accent); border: 1px solid var(--accent);
+    border-radius: 4px; padding: 0 5px;
+  }
+  .meta { color: var(--text-muted); font-size: 12.5px; margin-left: auto; }
+  .dirline { color: var(--text-muted); font-size: 12px; margin-top: 2px;
+             overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* Stage meter — segmented, 2px gaps, blue fill, pulsing current */
+  .stageline { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
+  .meter { display: flex; gap: 2px; flex: 1; max-width: 460px; height: 10px; }
+  .seg {
+    flex: 1; background: var(--surface-2); border-radius: 3px;
+    min-width: 8px; position: relative;
+  }
+  .seg.done { background: var(--accent); }
+  .seg.current {
+    background: var(--accent-soft);
+    outline: 2px solid var(--accent); outline-offset: -2px;
+    animation: pulse 1.6s ease-in-out infinite;
+  }
+  .stagetext { font-size: 13px; color: var(--text-secondary); white-space: nowrap; }
+  .stagetext b { color: var(--text-primary); }
+  .statline { color: var(--text-muted); font-size: 12.5px; margin-top: 8px;
+              overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .goalline { margin-top: 8px; font-size: 13px; color: var(--text-secondary); }
+  .goalline .kind { margin-right: 6px; }
+
+  /* Detail (click-through) */
+  .detail { display: none; margin-top: 14px; border-top: 1px solid var(--border);
+            padding-top: 12px; cursor: default; }
+  .card.open .detail { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  @media (max-width: 760px) { .card.open .detail { grid-template-columns: 1fr; } }
+  .detail h3 {
+    font-size: 11px; letter-spacing: .07em; text-transform: uppercase;
+    color: var(--text-muted); margin: 0 0 8px; font-weight: 600;
+  }
+  .stages li {
+    list-style: none; display: flex; gap: 8px; padding: 3px 0;
+    font-size: 13px; color: var(--text-secondary); align-items: baseline;
+  }
+  .stages { margin: 0; padding: 0; }
+  .stages .snum { color: var(--text-muted); min-width: 22px; text-align: right; }
+  .stages .done-mark { color: var(--good); }
+  .stages .cur-mark { color: var(--accent); font-weight: 700; }
+  .stages li.current { color: var(--text-primary); font-weight: 600; }
+  .tasks { margin: 2px 0 6px 30px; padding: 0; }
+  .tasks li { list-style: none; font-size: 12px; color: var(--text-muted); padding: 1px 0; }
+  .tasks .closed { text-decoration: line-through; opacity: .7; }
+  table { border-collapse: collapse; font-size: 12.5px; width: 100%; }
+  th { text-align: left; color: var(--text-muted); font-weight: 600;
+       padding: 2px 10px 4px 0; border-bottom: 1px solid var(--border); }
+  td { padding: 3px 10px 3px 0; color: var(--text-secondary);
+       border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; }
+  .feed { max-height: 260px; overflow-y: auto; font-size: 12.5px; }
+  .feed .ev { padding: 4px 0; border-bottom: 1px solid var(--border); }
+  .feed .ev .t { color: var(--text-muted); font-size: 11.5px; }
+  .feed .ev .topic { color: var(--accent); font-weight: 600; margin-right: 6px; }
+  .feed .msg .role { font-weight: 700; color: var(--text-muted); margin-right: 6px;
+                     font-size: 11px; text-transform: uppercase; }
+  .wide { grid-column: 1 / -1; }
+  pre.summary { white-space: pre-wrap; font: 12px/1.5 ui-monospace, monospace;
+                color: var(--text-secondary); background: var(--surface-2);
+                border-radius: 6px; padding: 10px; max-height: 220px; overflow: auto; }
+
+  /* Tooltip */
+  #tip {
+    position: fixed; z-index: 50; display: none; max-width: 380px;
+    background: var(--text-primary); color: var(--page);
+    border-radius: 8px; padding: 8px 11px; font-size: 12.5px; line-height: 1.45;
+    pointer-events: none; box-shadow: 0 4px 18px rgba(0,0,0,.25);
+  }
+  #tip .tt { font-weight: 650; }
+  #tip .ts { opacity: .75; }
+</style>
+</head>
+<body>
+<header>
+  <h1>claude-usage <span>· loops</span></h1>
+  <div class="pulse" id="live"></div>
+  <span id="refreshed"></span>
+  <div class="spacer"></div>
+  <button id="awake" title="Keep this machine awake (Amphetamine-style)">
+    <span class="icon">💤</span><span class="label">Keep awake</span>
+    <span class="lid" hidden>lid</span><span class="knob"></span>
+  </button>
+</header>
+<main>
+  <h2>Ralph loops</h2>
+  <div id="ralph"></div>
+  <h2>Claude sessions</h2>
+  <div id="sessions"></div>
+</main>
+<div id="tip"></div>
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g,
+  c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const open = new Set();       // expanded card ids, survives re-render
+let lastPayload = "";
+
+function ago(ts) {
+  if (!ts) return "";
+  const s = Math.max(0, (Date.now() - Date.parse(ts)) / 1000);
+  if (s < 60) return "just now";
+  if (s < 3600) return Math.floor(s / 60) + "m ago";
+  if (s < 86400) return Math.floor(s / 3600) + "h ago";
+  return Math.floor(s / 86400) + "d ago";
+}
+function fmtMs(ms) {
+  const s = Math.floor((ms || 0) / 1000);
+  if (s >= 3600) return Math.floor(s / 3600) + "h " + Math.floor(s % 3600 / 60) + "m";
+  if (s >= 60) return Math.floor(s / 60) + "m " + (s % 60) + "s";
+  return s + "s";
+}
+function stateChip(l) {
+  const map = { running: ["●", "running"], busy: ["●", "busy"],
+                failed: ["✕", "failed"], completed: ["✓", "completed"],
+                idle: ["○", "idle"], shell: ["○", "shell"], stopped: ["○", "stopped"] };
+  const [icon, label] = map[l.state] || ["○", l.state];
+  return `<span class="chip ${esc(l.state)}">${icon} ${esc(label)}</span>`;
+}
+
+// -- tooltip ---------------------------------------------------------------
+const tip = $("#tip");
+function showTip(html, x, y) {
+  tip.innerHTML = html;
+  tip.style.display = "block";
+  const w = tip.offsetWidth, h = tip.offsetHeight;
+  tip.style.left = Math.min(x + 14, innerWidth - w - 10) + "px";
+  tip.style.top = (y + 18 + h > innerHeight ? y - h - 10 : y + 18) + "px";
+}
+function hideTip() { tip.style.display = "none"; }
+document.addEventListener("mousemove", e => {
+  const t = e.target.closest("[data-tip]");
+  if (t) showTip(t.dataset.tip, e.clientX, e.clientY); else hideTip();
+});
+
+// -- rendering -------------------------------------------------------------
+function stageMeter(l) {
+  if (!l.stage || !l.stages.length) return "";
+  const segs = l.stages.map(s => {
+    const tasks = s.tasks.length
+      ? `<span class="ts">${s.tasks.filter(t => t.status === "closed").length}/${s.tasks.length} tasks closed</span>`
+      : "";
+    const t = `<div class="tt">Stage ${s.n}${s.title ? " — " + esc(s.title) : ""}</div>` +
+              `${esc(s.status)} ${tasks}`;
+    return `<div class="seg ${esc(s.status)}" data-tip="${esc(t)}"></div>`;
+  }).join("");
+  const st = l.stage;
+  const step = st.step ? ` · step ${st.step}/${st.step_total}` : "";
+  const it = l.iteration != null ? ` · it ${l.iteration}` : "";
+  return `<div class="stageline">
+    <div class="meter">${segs}</div>
+    <span class="stagetext"><b>stage ${st.current}/${st.total}</b>${st.title ? " — " + esc(st.title) : ""}${step}${it}</span>
+  </div>`;
+}
+
+function ralphDetail(l) {
+  const stages = l.stages.map(s => {
+    const mark = s.status === "done" ? '<span class="done-mark">✓</span>'
+               : s.status === "current" ? '<span class="cur-mark">▶</span>' : "·";
+    const tasks = (s.status === "current" && s.tasks.length)
+      ? `<ul class="tasks">${s.tasks.map(t => {
+          const title = t.title.replace(new RegExp("^Stage " + s.n + ":\\s*"), "");
+          return `<li class="${esc(t.status)}">${t.status === "closed" ? "✓" : "◻"} ${esc(title)}</li>`;
+        }).join("")}</ul>`
+      : "";
+    return `<li class="${esc(s.status)}"><span class="snum">${s.n}</span> ${mark} ${esc(s.title || "")}</li>${tasks}`;
+  }).join("");
+
+  // ralph reports zeros for metrics it can't measure — blank them
+  const nz = (v, f) => (v ? f(v) : "");
+  const iters = l.iterations.length ? `<table><tr><th>it</th><th>turns</th><th>time</th><th>cost</th><th>ctx</th></tr>` +
+    l.iterations.map(i => `<tr><td>${i.n}</td><td>${nz(i.num_turns, t => t)}</td>` +
+      `<td>${fmtMs(i.duration_ms)}</td><td>${nz(i.cost_usd, c => "$" + c.toFixed(2))}</td>` +
+      `<td>${nz(i.context_pct, p => p.toFixed(0) + "%")}</td></tr>`).join("") +
+    `</table>` : `<div class="empty">no iterations yet</div>`;
+
+  const events = l.events.slice().reverse().map(ev =>
+    `<div class="ev"><span class="topic">${esc(ev.topic)}</span>` +
+    `<span class="t">${ago(ev.ts)}${ev.iteration != null ? " · it " + ev.iteration : ""}</span><br>` +
+    `${esc(ev.text)}</div>`).join("");
+
+  const history = l.history.slice(-8).reverse().map(r =>
+    `<div class="ev"><span class="topic">${r.stage != null ? "stage " + r.stage : "run"}</span>` +
+    `<span class="t">${ago(r.started)} → ${r.reason ? esc(r.reason) : (r.ended ? "done" : "running")}</span><br>` +
+    `${esc(r.prompt_head)}</div>`).join("");
+
+  return `<div class="detail">
+    <div><h3>Stages</h3><ul class="stages">${stages}</ul></div>
+    <div>
+      <h3>Iterations (current run)</h3>${iters}
+      <h3 style="margin-top:14px">Run history</h3><div class="feed">${history || '<div class="empty">none</div>'}</div>
+    </div>
+    <div class="wide"><h3>Events</h3><div class="feed">${events || '<div class="empty">none</div>'}</div></div>
+    ${l.summary_md ? `<div class="wide"><h3>Agent summary</h3><pre class="summary">${esc(l.summary_md)}</pre></div>` : ""}
+  </div>`;
+}
+
+function sessionDetail(l) {
+  const msgs = l.recent.slice().reverse().map(m =>
+    `<div class="ev msg"><span class="role">${esc(m.role)}</span>` +
+    `<span class="t">${ago(m.ts)}</span><br>${esc(m.text)}</div>`).join("");
+  return `<div class="detail"><div class="wide">
+    ${l.goal ? `<h3>Goal</h3><div class="goalline">${esc(l.goal.text)}</div>` : ""}
+    <h3 style="margin-top:${l.goal ? "14px" : "0"}">Recent messages</h3>
+    <div class="feed">${msgs || '<div class="empty">no recent messages</div>'}</div>
+  </div></div>`;
+}
+
+function card(l) {
+  const isRalph = l.kind === "ralph";
+  const last = l.last_event
+    ? `<div class="statline" data-tip="${esc(esc(l.last_event.text).slice(0, 600))}">` +
+      `last: <b>${esc(l.last_event.topic)}</b> ${ago(l.last_event.ts)} — ${esc(l.last_event.text)}</div>`
+    : "";
+  const goal = l.goal
+    ? `<div class="goalline"><span class="kind">GOAL</span>${esc(l.goal.text)}` +
+      `${l.goal.set_at ? ` <span class="meta">set ${ago(l.goal.set_at)}</span>` : ""}</div>`
+    : "";
+  const cost = l.cost_usd != null ? ` · $${l.cost_usd.toFixed(2)}` : "";
+  const meta = `${l.updated ? ago(l.updated) : ""}${cost}`;
+  return `<div class="card ${open.has(l.id) ? "open" : ""}" data-id="${esc(l.id)}">
+    <div class="card-top">
+      <span class="name">${esc(l.name)}</span>
+      ${isRalph ? '<span class="kind">RALPH</span>' : l.kind === "goal" ? '<span class="kind">GOAL</span>' : ""}
+      ${stateChip(l)}
+      <span class="meta">${meta}</span>
+    </div>
+    <div class="dirline">${esc(l.dir)}</div>
+    ${stageMeter(l)}
+    ${goal}
+    ${last}
+    ${isRalph ? ralphDetail(l) : sessionDetail(l)}
+  </div>`;
+}
+
+function render(data) {
+  const ralphs = data.loops.filter(l => l.kind === "ralph");
+  const sessions = data.loops.filter(l => l.kind !== "ralph");
+  $("#ralph").innerHTML = ralphs.map(card).join("") ||
+    '<div class="empty">No .ralph loops found under the scanned roots.</div>';
+  $("#sessions").innerHTML = sessions.map(card).join("") ||
+    '<div class="empty">No live Claude Code sessions.</div>';
+
+  const a = data.awake || { active: false };
+  const btn = $("#awake");
+  btn.classList.toggle("on", a.active);
+  btn.querySelector(".icon").textContent = a.active ? "☕" : "💤";
+  btn.querySelector(".label").textContent = a.active ? "Awake" : "Keep awake";
+  btn.querySelector(".lid").hidden = !a.lid;
+  btn.dataset.on = a.active ? "1" : "";
+}
+
+document.addEventListener("click", e => {
+  const c = e.target.closest(".card");
+  if (!c || e.target.closest(".detail")) return;
+  const id = c.dataset.id;
+  open.has(id) ? open.delete(id) : open.add(id);
+  c.classList.toggle("open");
+});
+
+$("#awake").addEventListener("click", async e => {
+  e.stopPropagation();
+  const on = !$("#awake").dataset.on;
+  const r = await fetch("/api/awake", { method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ on }) }).then(r => r.json()).catch(() => null);
+  if (r) {
+    if (r.warning) alert(r.warning);
+    lastPayload = "";
+    refresh();
+  }
+});
+
+async function refresh() {
+  try {
+    const data = await fetch("/api/loops").then(r => r.json());
+    $("#live").style.background = "var(--good)";
+    $("#refreshed").textContent = "updated " + new Date().toLocaleTimeString();
+    // re-render only when the loops themselves changed — generated_at ticks
+    // every poll and a full re-render resets feed scroll positions
+    const key = JSON.stringify([data.awake, data.loops]);
+    if (key !== lastPayload) {
+      lastPayload = key;
+      render(data);
+    }
+  } catch {
+    $("#live").style.background = "var(--critical)";
+    $("#refreshed").textContent = "connection lost — is `claude-usage loops --serve` still running?";
+  }
+}
+refresh();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>
